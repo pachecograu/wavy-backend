@@ -174,15 +174,50 @@ data "aws_subnets" "default" {
   }
 }
 
-resource "aws_security_group" "ecs" {
-  name_prefix = "${var.project_name}-ecs-"
+# Security Group for ALB
+resource "aws_security_group" "alb" {
+  name_prefix = "${var.project_name}-alb-"
   vpc_id      = data.aws_vpc.default.id
+
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+    description = "HTTP from internet"
+  }
 
   ingress {
     from_port   = 3000
     to_port     = 3000
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
+    description = "WebSocket from internet"
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "${var.project_name}-alb-sg"
+  }
+}
+
+# Security Group for ECS
+resource "aws_security_group" "ecs" {
+  name_prefix = "${var.project_name}-ecs-"
+  vpc_id      = data.aws_vpc.default.id
+
+  ingress {
+    from_port       = 3000
+    to_port         = 3000
+    protocol        = "tcp"
+    security_groups = [aws_security_group.alb.id]
+    description     = "Allow traffic from ALB"
   }
 
   ingress {
@@ -190,6 +225,7 @@ resource "aws_security_group" "ecs" {
     to_port     = 1935
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
+    description = "RTMP"
   }
 
   ingress {
@@ -197,6 +233,7 @@ resource "aws_security_group" "ecs" {
     to_port     = 8000
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
+    description = "HLS"
   }
 
   ingress {
@@ -204,6 +241,7 @@ resource "aws_security_group" "ecs" {
     to_port     = 7880
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
+    description = "LiveKit"
   }
 
   egress {
@@ -284,6 +322,65 @@ resource "aws_iam_role_policy" "ecs_task_dynamodb" {
 }
 
 # ============================================
+# Application Load Balancer
+# ============================================
+
+resource "aws_lb" "main" {
+  name               = "${var.project_name}-alb"
+  internal           = false
+  load_balancer_type = "application"
+  security_groups    = [aws_security_group.alb.id]
+  subnets            = data.aws_subnets.default.ids
+
+  enable_deletion_protection = false
+  enable_http2              = true
+
+  tags = {
+    Name = "${var.project_name}-alb"
+  }
+}
+
+resource "aws_lb_target_group" "app" {
+  name        = "${var.project_name}-tg"
+  port        = 3000
+  protocol    = "HTTP"
+  vpc_id      = data.aws_vpc.default.id
+  target_type = "ip"
+
+  health_check {
+    enabled             = true
+    healthy_threshold   = 2
+    unhealthy_threshold = 3
+    timeout             = 5
+    interval            = 30
+    path                = "/health"
+    protocol            = "HTTP"
+    matcher             = "200"
+  }
+
+  stickiness {
+    enabled         = true
+    type            = "lb_cookie"
+    cookie_duration = 86400
+  }
+
+  tags = {
+    Name = "${var.project_name}-tg"
+  }
+}
+
+resource "aws_lb_listener" "http" {
+  load_balancer_arn = aws_lb.main.arn
+  port              = "80"
+  protocol          = "HTTP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.app.arn
+  }
+}
+
+# ============================================
 # ECS Task Definition
 # ============================================
 
@@ -342,7 +439,7 @@ resource "aws_ecs_service" "app" {
   name            = "${var.project_name}-service"
   cluster         = aws_ecs_cluster.main.id
   task_definition = aws_ecs_task_definition.app.arn
-  desired_count   = 0
+  desired_count   = 1
   launch_type     = "FARGATE"
 
   network_configuration {
@@ -350,6 +447,16 @@ resource "aws_ecs_service" "app" {
     security_groups  = [aws_security_group.ecs.id]
     assign_public_ip = true
   }
+
+  load_balancer {
+    target_group_arn = aws_lb_target_group.app.arn
+    container_name   = var.project_name
+    container_port   = 3000
+  }
+
+  health_check_grace_period_seconds = 60
+
+  depends_on = [aws_lb_listener.http]
 }
 
 # ============================================
@@ -504,6 +611,16 @@ resource "aws_lambda_permission" "eventbridge" {
 # ============================================
 # Outputs
 # ============================================
+
+output "alb_dns_name" {
+  description = "ALB DNS name"
+  value       = aws_lb.main.dns_name
+}
+
+output "alb_url" {
+  description = "ALB URL"
+  value       = "http://${aws_lb.main.dns_name}"
+}
 
 output "ecr_repository_url" {
   description = "ECR repository URL"
