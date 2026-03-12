@@ -1,15 +1,11 @@
 const Wave = require('../models/Wave');
 const logger = require('../utils/logger');
-const mongoose = require('mongoose');
 
 // In-memory storage for active waves and connected users
 const activeWaves = new Map();
 const memoryWaves = new Map();
 const connectedUsers = new Map(); // Changed to Map to track socket IDs
 const userSockets = new Map(); // Track multiple sockets per user
-
-// Check if MongoDB is connected
-const isMongoConnected = () => mongoose.connection.readyState === 1;
 
 module.exports = (io, socket) => {
   
@@ -76,34 +72,19 @@ module.exports = (io, socket) => {
       
       socket.userId = userId;
       
-      let wave;
+      // Create wave in DynamoDB
+      const wave = await Wave.create({
+        name: data.name || 'New Wave',
+        djName: data.djName || 'Anonymous DJ',
+        ownerId: userId,
+        isOnline: true,
+        listenersCount: 0
+      });
       
-      if (isMongoConnected()) {
-        wave = new Wave({
-          name: data.name || 'New Wave',
-          djName: data.djName || 'Anonymous DJ',
-          ownerId: userId,
-          isOnline: true,
-          listenersCount: 0
-        });
-        await wave.save();
-      } else {
-        // Use memory storage
-        const waveId = `wave_${Date.now()}`;
-        wave = {
-          _id: waveId,
-          id: waveId,
-          name: data.name || 'New Wave',
-          djName: data.djName || 'Anonymous DJ',
-          ownerId: userId,
-          isOnline: true,
-          listenersCount: 0,
-          createdAt: new Date()
-        };
-        memoryWaves.set(waveId, wave);
-      }
+      // Also store in memory for quick access
+      memoryWaves.set(wave.waveId, wave);
       
-      const waveId = wave._id?.toString() || wave.id;
+      const waveId = wave.waveId;
       activeWaves.set(waveId, { listeners: new Set() });
       
       socket.join(waveId);
@@ -123,13 +104,11 @@ module.exports = (io, socket) => {
       // Remove from active waves
       activeWaves.delete(waveId);
       
-      if (isMongoConnected()) {
-        // Mark wave as offline in database
-        await Wave.findByIdAndUpdate(waveId, { isOnline: false });
-      } else {
-        // Remove from memory storage
-        memoryWaves.delete(waveId);
-      }
+      // Mark wave as offline in DynamoDB
+      await Wave.update(waveId, { isOnline: false });
+      
+      // Remove from memory storage
+      memoryWaves.delete(waveId);
       
       // Notify all clients that wave is offline
       io.emit('wave-offline', { waveId });
@@ -179,11 +158,10 @@ module.exports = (io, socket) => {
 
   socket.on('update-wave', async (data) => {
     try {
-      const wave = await Wave.findByIdAndUpdate(
-        data.waveId,
-        { name: data.name, djName: data.djName },
-        { new: true }
-      );
+      const wave = await Wave.update(data.waveId, {
+        name: data.name,
+        djName: data.djName
+      });
       
       io.to(data.waveId).emit('wave-updated', wave);
       logger.info(`WAVE_UPDATED: Wave ${data.waveId} updated to name "${wave.name}" DJ "${wave.djName}"`);
@@ -204,35 +182,17 @@ module.exports = (io, socket) => {
     }
     
     // Only return waves from currently connected users
-    let onlineWaves = [];
     const realConnectedUsers = new Set(Array.from(userSockets.keys()));
     
-    if (isMongoConnected()) {
-      Wave.find({ isOnline: true })
-        .then(waves => {
-          onlineWaves = waves.filter(wave => realConnectedUsers.has(wave.ownerId))
-            .map(wave => ({
-              ...wave.toObject(),
-              listenersCount: activeWaves.get(wave._id.toString())?.listeners.size || 0
-            }));
-          socket.emit('online-waves', onlineWaves);
-          logger.info(`WAVES_LIST_REQUESTED: Sent ${onlineWaves.length} online waves to oyente`);
-        })
-        .catch((error) => {
-          logger.error(`GET_WAVES_ERROR: ${error.message}`);
-          socket.emit('online-waves', []);
-        });
-    } else {
-      // Use memory storage - only waves from connected users
-      const waves = Array.from(memoryWaves.values())
-        .filter(wave => wave.isOnline && realConnectedUsers.has(wave.ownerId));
-      onlineWaves = waves.map(wave => ({
-        ...wave,
-        listenersCount: activeWaves.get(wave.id)?.listeners.size || 0
-      }));
-      socket.emit('online-waves', onlineWaves);
-      logger.info(`WAVES_LIST_REQUESTED: Sent ${onlineWaves.length} online waves to oyente (memory)`);
-    }
+    // Use memory storage - only waves from connected users
+    const waves = Array.from(memoryWaves.values())
+      .filter(wave => wave.isOnline && realConnectedUsers.has(wave.ownerId));
+    const onlineWaves = waves.map(wave => ({
+      ...wave,
+      listenersCount: activeWaves.get(wave.waveId)?.listeners.size || 0
+    }));
+    socket.emit('online-waves', onlineWaves);
+    logger.info(`WAVES_LIST_REQUESTED: Sent ${onlineWaves.length} online waves to oyente`);
   });
 
   // Test transmission from emisor to oyentes
