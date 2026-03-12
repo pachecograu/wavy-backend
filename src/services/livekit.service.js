@@ -4,7 +4,8 @@ class LiveKitService {
   constructor() {
     this.apiKey = process.env.LIVEKIT_API_KEY || 'devkey';
     this.apiSecret = process.env.LIVEKIT_API_SECRET || 'secret';
-    this.wsUrl = process.env.LIVEKIT_URL || 'ws://localhost:7880';
+    const host = process.env.PUBLIC_HOST || 'localhost';
+    this.wsUrl = process.env.LIVEKIT_URL || `ws://${host}:7880`;
     
     this.roomService = new RoomServiceClient(this.wsUrl, this.apiKey, this.apiSecret);
     this.activeVoiceRooms = new Map();

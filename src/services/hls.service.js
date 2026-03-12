@@ -91,8 +91,9 @@ class HLSService {
   }
 
   getStreamUrl(roomId) {
+    const host = process.env.PUBLIC_HOST || 'localhost';
     const stream = this.activeStreams.get(roomId);
-    return stream ? `http://localhost:8000${stream.hlsPath}` : `http://localhost:8000/hls/${roomId}/index.m3u8`;
+    return stream ? `http://${host}:8000${stream.hlsPath}` : `http://${host}:8000/hls/${roomId}/index.m3u8`;
   }
 
   isStreamActive(roomId) {
