@@ -25,3 +25,35 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+
+# Terraform
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+
+# Scripts temporales (no necesarios en repo)
+deploy-complete.bat
+deploy-to-aws.bat
+update-ecs-service.bat
+start-service.bat
+start-hybrid.bat
+start-production.bat
+start-wavy.bat
+setup-aws.sh
+create-iam-user.sh
+change-to-4hours.sh
+
+# Archivos de prueba
+bits-visualization.js
+test-transmission.js
+audio-test.html
+
+# Configuraciones locales
+livekit.yaml
+mediamtx.yml
+install-livekit.bat
+start-wavy.sh
+*.sh
+*.md
+*.bat

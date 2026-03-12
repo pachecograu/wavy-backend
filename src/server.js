@@ -3,7 +3,6 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
-const mongoose = require('mongoose');
 const path = require('path');
 
 const waveSocket = require('./sockets/wave.socket');
@@ -30,10 +29,8 @@ app.use(cors());
 app.use(express.json());
 app.use('/hls', express.static(path.join(__dirname, '../public/hls')));
 
-// MongoDB Connection
-mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/wavy')
-  .then(() => console.log('🌊 MongoDB connected'))
-  .catch(err => console.log('⚠️ MongoDB not available, using memory storage'));
+// DynamoDB está listo (sin necesidad de conexión)
+console.log('🗄️ DynamoDB configured');
 
 // Iniciar servicios de audio
 hlsService.start();
