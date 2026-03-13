@@ -1,5 +1,5 @@
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
-const { DynamoDBDocumentClient, PutCommand, GetCommand, UpdateCommand, DeleteCommand, ScanCommand } = require('@aws-sdk/lib-dynamodb');
+const { DynamoDBDocumentClient, PutCommand, GetCommand, UpdateCommand, DeleteCommand, ScanCommand, TransactWriteCommand } = require('@aws-sdk/lib-dynamodb');
 const { v4: uuidv4 } = require('uuid');
 
 const client = new DynamoDBClient({ region: 'us-east-1' });
@@ -67,6 +67,160 @@ class Wave {
       TableName: TABLE_NAME
     }));
     return result.Items;
+  }
+
+  /**
+   * Create wave with transaction (atomic operation)
+   * Creates wave and updates user's active wave count
+   */
+  static async createWithTransaction(data) {
+    const wave = {
+      waveId: uuidv4(),
+      name: data.name,
+      djName: data.djName,
+      ownerId: data.ownerId,
+      isOnline: true,
+      listenersCount: 0,
+      currentTrack: data.currentTrack || null,
+      createdAt: new Date().toISOString()
+    };
+
+    const transactItems = [
+      {
+        Put: {
+          TableName: TABLE_NAME,
+          Item: wave
+        }
+      },
+      {
+        Update: {
+          TableName: 'wavy-backend-users',
+          Key: { userId: data.ownerId },
+          UpdateExpression: 'SET activeWaveId = :waveId, updatedAt = :now',
+          ExpressionAttributeValues: {
+            ':waveId': wave.waveId,
+            ':now': new Date().toISOString()
+          }
+        }
+      }
+    ];
+
+    await docClient.send(new TransactWriteCommand({
+      TransactItems: transactItems
+    }));
+
+    return wave;
+  }
+
+  /**
+   * Stop wave with transaction (atomic operation)
+   * Marks wave offline and clears user's active wave
+   */
+  static async stopWithTransaction(waveId, ownerId) {
+    const transactItems = [
+      {
+        Update: {
+          TableName: TABLE_NAME,
+          Key: { waveId },
+          UpdateExpression: 'SET isOnline = :offline, stoppedAt = :now',
+          ExpressionAttributeValues: {
+            ':offline': false,
+            ':now': new Date().toISOString()
+          }
+        }
+      },
+      {
+        Update: {
+          TableName: 'wavy-backend-users',
+          Key: { userId: ownerId },
+          UpdateExpression: 'REMOVE activeWaveId SET updatedAt = :now',
+          ExpressionAttributeValues: {
+            ':now': new Date().toISOString()
+          }
+        }
+      }
+    ];
+
+    await docClient.send(new TransactWriteCommand({
+      TransactItems: transactItems
+    }));
+  }
+
+  /**
+   * Join wave with transaction (atomic operation)
+   * Increments listener count and records user session
+   */
+  static async joinWithTransaction(waveId, userId) {
+    const sessionId = uuidv4();
+    const transactItems = [
+      {
+        Update: {
+          TableName: TABLE_NAME,
+          Key: { waveId },
+          UpdateExpression: 'SET listenersCount = listenersCount + :inc',
+          ExpressionAttributeValues: {
+            ':inc': 1
+          }
+        }
+      },
+      {
+        Put: {
+          TableName: 'wavy-backend-sessions',
+          Item: {
+            sessionId,
+            waveId,
+            userId,
+            joinedAt: new Date().toISOString(),
+            isActive: true
+          }
+        }
+      }
+    ];
+
+    await docClient.send(new TransactWriteCommand({
+      TransactItems: transactItems
+    }));
+
+    return sessionId;
+  }
+
+  /**
+   * Leave wave with transaction (atomic operation)
+   * Decrements listener count and marks session inactive
+   */
+  static async leaveWithTransaction(waveId, sessionId) {
+    const transactItems = [
+      {
+        Update: {
+          TableName: TABLE_NAME,
+          Key: { waveId },
+          UpdateExpression: 'SET listenersCount = listenersCount - :dec',
+          ExpressionAttributeValues: {
+            ':dec': 1
+          },
+          ConditionExpression: 'listenersCount > :zero',
+          ExpressionAttributeValues: {
+            ':dec': 1,
+            ':zero': 0
+          }
+        }
+      },
+      {
+        Update: {
+          TableName: 'wavy-backend-sessions',
+          Key: { sessionId },
+          UpdateExpression: 'SET isActive = :inactive, leftAt = :now',
+          ExpressionAttributeValues: {
+            ':inactive': false,
+            ':now': new Date().toISOString()
+          }
+        }
+      }
+    ];
+
+    await docClient.send(new TransactWriteCommand({
+      TransactItems: transactItems
+    }));
   }
 }
 

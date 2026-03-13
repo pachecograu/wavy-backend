@@ -13,6 +13,7 @@ const hybridSocket = require('./sockets/hybrid.socket');
 
 const hlsService = require('./services/hls.service');
 const liveKitService = require('./services/livekit.service');
+const Cache = require('./models/Cache');
 
 const app = express();
 const server = http.createServer(app);
@@ -52,7 +53,20 @@ app.post('/api/rooms/:roomId/voice-token', async (req, res) => {
     const { roomId } = req.params;
     const { userId, isHost } = req.body;
     
+    // Check cache first
+    const cachedToken = await Cache.getCachedVoiceToken(roomId, userId);
+    if (cachedToken) {
+      console.log(`🎯 Cache hit: Voice token for ${userId} in room ${roomId}`);
+      return res.json(cachedToken);
+    }
+    
+    // Generate new token
     const voiceToken = await liveKitService.createVoiceToken(roomId, userId, isHost);
+    
+    // Cache the token
+    await Cache.cacheVoiceToken(roomId, userId, voiceToken);
+    console.log(`💾 Cached voice token for ${userId} in room ${roomId}`);
+    
     res.json(voiceToken);
   } catch (error) {
     res.status(500).json({ error: error.message });

@@ -1,4 +1,5 @@
 const Wave = require('../models/Wave');
+const Cache = require('../models/Cache');
 const logger = require('../utils/logger');
 
 // In-memory storage for active waves and connected users
@@ -64,7 +65,6 @@ module.exports = (io, socket) => {
     try {
       const { userId } = data;
       
-      // More flexible user validation
       if (!userId) {
         socket.emit('error', { message: 'User ID required' });
         return;
@@ -72,16 +72,17 @@ module.exports = (io, socket) => {
       
       socket.userId = userId;
       
-      // Create wave in DynamoDB
-      const wave = await Wave.create({
+      // Use transaction to create wave and update user atomically
+      const wave = await Wave.createWithTransaction({
         name: data.name || 'New Wave',
         djName: data.djName || 'Anonymous DJ',
-        ownerId: userId,
-        isOnline: true,
-        listenersCount: 0
+        ownerId: userId
       });
       
-      // Also store in memory for quick access
+      // Cache wave data
+      await Cache.cacheWave(wave.waveId, wave);
+      
+      // Store in memory for quick access
       memoryWaves.set(wave.waveId, wave);
       
       const waveId = wave.waveId;
@@ -90,7 +91,7 @@ module.exports = (io, socket) => {
       socket.join(waveId);
       io.emit('wave-online', wave);
       
-      logger.info(`EMISOR_CREATED_WAVE: User ${userId} created wave "${wave.name}" as DJ "${wave.djName}"`);
+      logger.info(`EMISOR_CREATED_WAVE: User ${userId} created wave "${wave.name}" with TRANSACTION`);
     } catch (error) {
       logger.error(`CREATE_WAVE_ERROR: ${error.message}`);
       socket.emit('error', { message: 'Failed to create wave' });
@@ -101,11 +102,11 @@ module.exports = (io, socket) => {
     const { waveId, userId } = data;
     
     try {
+      // Use transaction to stop wave and update user atomically
+      await Wave.stopWithTransaction(waveId, userId);
+      
       // Remove from active waves
       activeWaves.delete(waveId);
-      
-      // Mark wave as offline in DynamoDB
-      await Wave.update(waveId, { isOnline: false });
       
       // Remove from memory storage
       memoryWaves.delete(waveId);
@@ -113,7 +114,7 @@ module.exports = (io, socket) => {
       // Notify all clients that wave is offline
       io.emit('wave-offline', { waveId });
       
-      logger.info(`WAVE_STOPPED: User ${userId} stopped wave ${waveId}`);
+      logger.info(`WAVE_STOPPED: User ${userId} stopped wave ${waveId} with TRANSACTION`);
     } catch (error) {
       logger.error(`STOP_WAVE_ERROR: ${error.message}`);
     }
@@ -122,37 +123,52 @@ module.exports = (io, socket) => {
   socket.on('join-wave', async (data) => {
     const { waveId, userId } = data;
     
-    socket.join(waveId);
-    
-    if (activeWaves.has(waveId)) {
-      activeWaves.get(waveId).listeners.add(userId);
-      const count = activeWaves.get(waveId).listeners.size;
+    try {
+      socket.join(waveId);
       
-      // Emit to all sockets, not just the wave room
-      io.emit('listeners-update', { waveId, count });
-      logger.info(`OYENTE_JOINED_WAVE: User ${userId} joined wave ${waveId}, total listeners: ${count}`);
+      // Use transaction to join wave and create session atomically
+      const sessionId = await Wave.joinWithTransaction(waveId, userId);
+      socket.sessionId = sessionId;
       
-      // Send current track info to new listener
-      socket.to(waveId).emit('listener_joined', {
-        userId,
-        listenersCount: count,
-        timestamp: Date.now()
-      });
+      if (activeWaves.has(waveId)) {
+        activeWaves.get(waveId).listeners.add(userId);
+        const count = activeWaves.get(waveId).listeners.size;
+        
+        io.emit('listeners-update', { waveId, count });
+        logger.info(`OYENTE_JOINED_WAVE: User ${userId} joined wave ${waveId} with TRANSACTION, session: ${sessionId}`);
+        
+        socket.to(waveId).emit('listener_joined', {
+          userId,
+          listenersCount: count,
+          timestamp: Date.now()
+        });
+      }
+    } catch (error) {
+      logger.error(`JOIN_WAVE_ERROR: ${error.message}`);
+      socket.emit('error', { message: 'Failed to join wave' });
     }
   });
 
   socket.on('leave-wave', async (data) => {
     const { waveId, userId } = data;
     
-    socket.leave(waveId);
-    
-    if (activeWaves.has(waveId)) {
-      activeWaves.get(waveId).listeners.delete(userId);
-      const count = activeWaves.get(waveId).listeners.size;
+    try {
+      socket.leave(waveId);
       
-      // Emit to all sockets, not just the wave room
-      io.emit('listeners-update', { waveId, count });
-      logger.info(`USER_LEFT_WAVE: User ${userId} left wave ${waveId}, remaining listeners: ${count}`);
+      // Use transaction to leave wave and update session atomically
+      if (socket.sessionId) {
+        await Wave.leaveWithTransaction(waveId, socket.sessionId);
+      }
+      
+      if (activeWaves.has(waveId)) {
+        activeWaves.get(waveId).listeners.delete(userId);
+        const count = activeWaves.get(waveId).listeners.size;
+        
+        io.emit('listeners-update', { waveId, count });
+        logger.info(`USER_LEFT_WAVE: User ${userId} left wave ${waveId} with TRANSACTION`);
+      }
+    } catch (error) {
+      logger.error(`LEAVE_WAVE_ERROR: ${error.message}`);
     }
   });
 
@@ -171,10 +187,9 @@ module.exports = (io, socket) => {
     }
   });
 
-  socket.on('get-online-waves', (data) => {
+  socket.on('get-online-waves', async (data) => {
     const { userRole } = data;
     
-    // Only allow listeners to get waves list
     if (userRole !== 'oyente') {
       socket.emit('online-waves', []);
       logger.info(`WAVES_LIST_DENIED: Emisor tried to access waves list`);
@@ -184,15 +199,22 @@ module.exports = (io, socket) => {
     // Only return waves from currently connected users
     const realConnectedUsers = new Set(Array.from(userSockets.keys()));
     
-    // Use memory storage - only waves from connected users
-    const waves = Array.from(memoryWaves.values())
-      .filter(wave => wave.isOnline && realConnectedUsers.has(wave.ownerId));
+    // Try cache first for each wave
+    const waves = [];
+    for (const [waveId, wave] of memoryWaves.entries()) {
+      if (wave.isOnline && realConnectedUsers.has(wave.ownerId)) {
+        const cachedWave = await Cache.getCachedWave(waveId);
+        waves.push(cachedWave || wave);
+      }
+    }
+    
     const onlineWaves = waves.map(wave => ({
       ...wave,
       listenersCount: activeWaves.get(wave.waveId)?.listeners.size || 0
     }));
+    
     socket.emit('online-waves', onlineWaves);
-    logger.info(`WAVES_LIST_REQUESTED: Sent ${onlineWaves.length} online waves to oyente`);
+    logger.info(`WAVES_LIST_REQUESTED: Sent ${onlineWaves.length} online waves (with CACHE)`);
   });
 
   // Test transmission from emisor to oyentes

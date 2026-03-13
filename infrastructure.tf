@@ -99,6 +99,56 @@ resource "aws_dynamodb_table" "tracks" {
   }
 }
 
+# Cache table with TTL for token caching
+resource "aws_dynamodb_table" "cache" {
+  name         = "${var.project_name}-cache"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "cacheKey"
+
+  attribute {
+    name = "cacheKey"
+    type = "S"
+  }
+
+  ttl {
+    attribute_name = "ttl"
+    enabled        = true
+  }
+
+  tags = {
+    Name        = "${var.project_name}-cache"
+    Environment = "production"
+  }
+}
+
+# Sessions table for tracking user sessions in waves
+resource "aws_dynamodb_table" "sessions" {
+  name         = "${var.project_name}-sessions"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "sessionId"
+
+  attribute {
+    name = "sessionId"
+    type = "S"
+  }
+
+  attribute {
+    name = "waveId"
+    type = "S"
+  }
+
+  global_secondary_index {
+    name            = "waveId-index"
+    hash_key        = "waveId"
+    projection_type = "ALL"
+  }
+
+  tags = {
+    Name        = "${var.project_name}-sessions"
+    Environment = "production"
+  }
+}
+
 # ============================================
 # ECR Repository
 # ============================================
@@ -315,7 +365,10 @@ resource "aws_iam_role_policy" "ecs_task_dynamodb" {
         aws_dynamodb_table.waves.arn,
         aws_dynamodb_table.users.arn,
         aws_dynamodb_table.tracks.arn,
-        "${aws_dynamodb_table.tracks.arn}/index/*"
+        aws_dynamodb_table.cache.arn,
+        aws_dynamodb_table.sessions.arn,
+        "${aws_dynamodb_table.tracks.arn}/index/*",
+        "${aws_dynamodb_table.sessions.arn}/index/*"
       ]
     }]
   })
@@ -640,9 +693,11 @@ output "ecs_service_name" {
 output "dynamodb_tables" {
   description = "DynamoDB table names"
   value = {
-    waves  = aws_dynamodb_table.waves.name
-    users  = aws_dynamodb_table.users.name
-    tracks = aws_dynamodb_table.tracks.name
+    waves    = aws_dynamodb_table.waves.name
+    users    = aws_dynamodb_table.users.name
+    tracks   = aws_dynamodb_table.tracks.name
+    cache    = aws_dynamodb_table.cache.name
+    sessions = aws_dynamodb_table.sessions.name
   }
 }
 
