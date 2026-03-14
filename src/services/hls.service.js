@@ -31,7 +31,7 @@ class HLSService {
         mediaroot: path.join(__dirname, '../../public')
       },
       relay: {
-        ffmpeg: process.platform === 'win32' ? 'ffmpeg' : '/usr/local/bin/ffmpeg',
+        ffmpeg: process.platform === 'win32' ? 'ffmpeg' : '/usr/bin/ffmpeg',
         tasks: [
           {
             app: 'live',

@@ -22,9 +22,7 @@ module.exports = (io, socket) => {
       
       // Crear sala de voz si es host (non-blocking, LiveKit may not be available)
       if (isHost) {
-        try { await liveKitService.createVoiceRoom(roomId); } catch(e) {
-          console.warn(`⚠️ LiveKit not available, voice disabled: ${e.message}`);
-        }
+        liveKitService.createVoiceRoom(roomId).catch(() => {});
       }
       
       // Responder con URLs de streaming
