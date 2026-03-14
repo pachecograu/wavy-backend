@@ -10,6 +10,9 @@ const chatSocket = require('./sockets/chat.socket');
 const reactionSocket = require('./sockets/reaction.socket');
 const trackSocket = require('./sockets/track.socket');
 const hybridSocket = require('./sockets/hybrid.socket');
+const voiceSocket = require('./sockets/voice.socket');
+const qualitySocket = require('./sockets/quality.socket');
+const logSocket = require('./sockets/log.socket');
 
 const hlsService = require('./services/hls.service');
 const liveKitService = require('./services/livekit.service');
@@ -82,6 +85,9 @@ io.on('connection', (socket) => {
   reactionSocket(io, socket);
   trackSocket(io, socket);
   hybridSocket(io, socket);
+  voiceSocket(io, socket);
+  qualitySocket(io, socket);
+  logSocket(io, socket);
   
   socket.on('disconnect', () => {
     console.log(`❌ User disconnected: ${socket.id}`);

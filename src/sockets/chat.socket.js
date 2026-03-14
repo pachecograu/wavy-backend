@@ -1,4 +1,5 @@
 const Wave = require('../models/Wave');
+const logger = require('../utils/logger');
 
 module.exports = (io, socket) => {
   
@@ -15,20 +16,20 @@ module.exports = (io, socket) => {
     };
     
     io.to(waveId).emit('public-message', messageData);
-    console.log(`💬 Public message in ${waveId}: ${message}`);
+    logger.info(`PUBLIC_CHAT: ${userId} in ${waveId}: ${message}`);
   });
 
   socket.on('send-private-message', async (data) => {
     const { waveId, fromUserId, toUserId, message } = data;
     
     try {
-      // Validate that one of the users is the wave owner
       const wave = await Wave.findById(waveId);
       if (!wave) {
         socket.emit('error', { message: 'Wave not found' });
         return;
       }
       
+      // Only owner <-> listener private chat allowed
       const isValidPrivateChat = wave.ownerId === fromUserId || wave.ownerId === toUserId;
       if (!isValidPrivateChat) {
         socket.emit('error', { message: 'Private chat not allowed' });
@@ -45,12 +46,14 @@ module.exports = (io, socket) => {
         timestamp: new Date().toISOString()
       };
       
-      // Send to both users
+      // Send to both users via their userId rooms
+      // (works because wave.socket.js does socket.join(userId) on connect)
       io.to(fromUserId).emit('private-message', messageData);
       io.to(toUserId).emit('private-message', messageData);
       
-      console.log(`📩 Private message from ${fromUserId} to ${toUserId}`);
+      logger.info(`PRIVATE_CHAT: ${fromUserId} -> ${toUserId} in ${waveId}`);
     } catch (error) {
+      logger.error(`PRIVATE_CHAT_ERROR: ${error.message}`);
       socket.emit('error', { message: 'Failed to send private message' });
     }
   });

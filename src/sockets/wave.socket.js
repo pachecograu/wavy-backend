@@ -1,20 +1,27 @@
 const Wave = require('../models/Wave');
 const Cache = require('../models/Cache');
 const logger = require('../utils/logger');
+const voiceSocket = require('./voice.socket');
+const qualitySocket = require('./quality.socket');
 
 // In-memory storage for active waves and connected users
 const activeWaves = new Map();
 const memoryWaves = new Map();
-const connectedUsers = new Map(); // Changed to Map to track socket IDs
-const userSockets = new Map(); // Track multiple sockets per user
+const connectedUsers = new Map();
+const userSockets = new Map();
+// Track emisor connection state per wave
+const emisorState = new Map(); // waveId -> { userId, state, disconnectedAt }
+const RECONNECT_GRACE_PERIOD = 15000; // 15s grace period before marking wave offline
 
 module.exports = (io, socket) => {
   
-  // Track connected users with duplicate prevention
+  // Track connected users + join userId room for private chat
   socket.on('user-connected', (data) => {
     const { userId } = data;
     
-    // Allow multiple connections per user (different tabs/devices)
+    // Join a room with the userId so private messages can reach this user
+    socket.join(userId);
+    
     if (userSockets.has(userId)) {
       userSockets.get(userId).add(socket.id);
     } else {
@@ -23,6 +30,21 @@ module.exports = (io, socket) => {
     
     connectedUsers.set(socket.id, userId);
     socket.userId = userId;
+    
+    // Check if this user was a disconnected emisor — trigger reconnect
+    for (const [waveId, state] of emisorState.entries()) {
+      if (state.userId === userId && state.state === 'reconnecting') {
+        clearTimeout(state.offlineTimer);
+        state.state = 'connected';
+        emisorState.set(waveId, state);
+        
+        // Notify all listeners to reconnect to the stream
+        io.to(waveId).emit('emisor-reconnected', { waveId, userId });
+        io.to(waveId).emit('emisor-state', { waveId, state: 'connected' });
+        logger.info(`EMISOR_RECONNECTED: ${userId} reconnected to wave ${waveId}`);
+      }
+    }
+    
     logger.info(`USER_CONNECTED: ${userId} connected to socket ${socket.id}`);
   });
   
@@ -30,23 +52,39 @@ module.exports = (io, socket) => {
     const userId = connectedUsers.get(socket.id);
     
     if (userId) {
-      // Remove this socket from user's socket set
       if (userSockets.has(userId)) {
         userSockets.get(userId).delete(socket.id);
         
-        // If no more sockets for this user, clean up completely
         if (userSockets.get(userId).size === 0) {
           userSockets.delete(userId);
           
-          // Clean up user's waves
+          // Check if this user owns any active waves — start grace period
           for (const [waveId, waveData] of activeWaves.entries()) {
             if (memoryWaves.has(waveId)) {
               const wave = memoryWaves.get(waveId);
               if (wave.ownerId === userId) {
-                activeWaves.delete(waveId);
-                memoryWaves.delete(waveId);
-                io.emit('wave-offline', { waveId });
-                logger.info(`WAVE_OFFLINE: Wave ${waveId} went offline (owner ${userId} disconnected)`);
+                // Don't kill wave immediately — give grace period for reconnect
+                const state = {
+                  userId,
+                  state: 'reconnecting',
+                  disconnectedAt: Date.now(),
+                  offlineTimer: setTimeout(() => {
+                    // Grace period expired — wave goes offline
+                    activeWaves.delete(waveId);
+                    memoryWaves.delete(waveId);
+                    emisorState.delete(waveId);
+                    voiceSocket.cleanupWave(waveId);
+                    qualitySocket.cleanupWave(waveId);
+                    io.emit('wave-offline', { waveId });
+                    io.to(waveId).emit('emisor-state', { waveId, state: 'disconnected' });
+                    logger.info(`WAVE_OFFLINE: Wave ${waveId} went offline after grace period`);
+                  }, RECONNECT_GRACE_PERIOD)
+                };
+                emisorState.set(waveId, state);
+                
+                // Notify listeners that emisor is reconnecting
+                io.to(waveId).emit('emisor-state', { waveId, state: 'reconnecting' });
+                logger.info(`EMISOR_DISCONNECTED: ${userId} disconnected from wave ${waveId}, grace period started`);
               }
             }
           }
@@ -72,21 +110,20 @@ module.exports = (io, socket) => {
       
       socket.userId = userId;
       
-      // Use transaction to create wave and update user atomically
       const wave = await Wave.createWithTransaction({
         name: data.name || 'New Wave',
         djName: data.djName || 'Anonymous DJ',
         ownerId: userId
       });
       
-      // Cache wave data
       await Cache.cacheWave(wave.waveId, wave);
-      
-      // Store in memory for quick access
       memoryWaves.set(wave.waveId, wave);
       
       const waveId = wave.waveId;
       activeWaves.set(waveId, { listeners: new Set() });
+      
+      // Track emisor state
+      emisorState.set(waveId, { userId, state: 'connected', disconnectedAt: null, offlineTimer: null });
       
       socket.join(waveId);
       io.emit('wave-online', wave);
@@ -102,17 +139,22 @@ module.exports = (io, socket) => {
     const { waveId, userId } = data;
     
     try {
-      // Use transaction to stop wave and update user atomically
       await Wave.stopWithTransaction(waveId, userId);
       
-      // Remove from active waves
       activeWaves.delete(waveId);
-      
-      // Remove from memory storage
       memoryWaves.delete(waveId);
       
-      // Notify all clients that wave is offline
+      // Clean up emisor state and cancel any pending timers
+      const state = emisorState.get(waveId);
+      if (state && state.offlineTimer) clearTimeout(state.offlineTimer);
+      emisorState.delete(waveId);
+      
+      // Clean up related modules
+      voiceSocket.cleanupWave(waveId);
+      qualitySocket.cleanupWave(waveId);
+      
       io.emit('wave-offline', { waveId });
+      io.to(waveId).emit('emisor-state', { waveId, state: 'offline' });
       
       logger.info(`WAVE_STOPPED: User ${userId} stopped wave ${waveId} with TRANSACTION`);
     } catch (error) {
@@ -163,6 +205,9 @@ module.exports = (io, socket) => {
       if (activeWaves.has(waveId)) {
         activeWaves.get(waveId).listeners.delete(userId);
         const count = activeWaves.get(waveId).listeners.size;
+        
+        // Clean up quality report for this listener
+        qualitySocket.removeListener(waveId, userId);
         
         io.emit('listeners-update', { waveId, count });
         logger.info(`USER_LEFT_WAVE: User ${userId} left wave ${waveId} with TRANSACTION`);
@@ -334,4 +379,20 @@ module.exports = (io, socket) => {
     
     logger.info(`BITS_STREAMED: ${byteSize} bytes sent to wave ${waveId}`);
   });
+
+  // Get emisor connection state
+  socket.on('get-emisor-state', (data) => {
+    const { waveId } = data;
+    const state = emisorState.get(waveId);
+    socket.emit('emisor-state', {
+      waveId,
+      state: state ? state.state : 'unknown'
+    });
+  });
 };
+
+// Export shared state for other modules
+module.exports.activeWaves = activeWaves;
+module.exports.memoryWaves = memoryWaves;
+module.exports.userSockets = userSockets;
+module.exports.connectedUsers = connectedUsers;
