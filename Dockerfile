@@ -2,7 +2,6 @@ FROM node:20-alpine
 
 # Instalar dependencias del sistema
 RUN apk add --no-cache \
-    ffmpeg \
     curl \
     bash
 

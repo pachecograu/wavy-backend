@@ -30,16 +30,6 @@ class HLSService {
         allow_origin: '*',
         mediaroot: path.join(__dirname, '../../public')
       },
-      relay: {
-        ffmpeg: process.platform === 'win32' ? 'ffmpeg' : '/usr/bin/ffmpeg',
-        tasks: [
-          {
-            app: 'live',
-            mode: 'push',
-            edge: 'rtmp://127.0.0.1/hls'
-          }
-        ]
-      },
       hls: {
         mediaroot: path.join(__dirname, '../../public'),
         allow_origin: '*'
