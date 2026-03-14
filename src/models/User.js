@@ -4,7 +4,7 @@ const { v4: uuidv4 } = require('uuid');
 
 const client = new DynamoDBClient({ region: 'us-east-1' });
 const docClient = DynamoDBDocumentClient.from(client);
-const TABLE_NAME = 'wavy-backend-users';
+const TABLE_NAME = 'wavy-users';
 
 class User {
   static async create(data) {

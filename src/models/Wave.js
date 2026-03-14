@@ -96,7 +96,7 @@ class Wave {
       },
       {
         Update: {
-          TableName: 'wavy-backend-users',
+          TableName: 'wavy-users',
           Key: { userId: data.ownerId },
           UpdateExpression: 'SET activeWaveId = :waveId, updatedAt = :now',
           ExpressionAttributeValues: {
@@ -133,7 +133,7 @@ class Wave {
       },
       {
         Update: {
-          TableName: 'wavy-backend-users',
+          TableName: 'wavy-users',
           Key: { userId: ownerId },
           UpdateExpression: 'REMOVE activeWaveId SET updatedAt = :now',
           ExpressionAttributeValues: {
