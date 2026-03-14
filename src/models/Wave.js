@@ -79,6 +79,8 @@ class Wave {
       name: data.name,
       djName: data.djName,
       ownerId: data.ownerId,
+      genre: data.genre || 'Sin información',
+      description: data.description || 'Sin información',
       isOnline: true,
       listenersCount: 0,
       currentTrack: data.currentTrack || null,

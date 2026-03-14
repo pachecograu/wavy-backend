@@ -110,13 +110,34 @@ module.exports = (io, socket) => {
       
       socket.userId = userId;
       
-      const wave = await Wave.createWithTransaction({
-        name: data.name || 'New Wave',
-        djName: data.djName || 'Anonymous DJ',
-        ownerId: userId
-      });
+      let wave;
+      try {
+        wave = await Wave.createWithTransaction({
+          name: data.name || 'New Wave',
+          djName: data.djName || 'Anonymous DJ',
+          ownerId: userId,
+          genre: data.genre || 'Sin información',
+          description: data.description || 'Sin información'
+        });
+      } catch (dbError) {
+        // DynamoDB failed — create wave in-memory only
+        logger.warn(`CREATE_WAVE_DB_FALLBACK: DynamoDB failed (${dbError.message}), using in-memory`);
+        const { v4: uuidv4 } = require('uuid');
+        wave = {
+          waveId: uuidv4(),
+          name: data.name || 'New Wave',
+          djName: data.djName || 'Anonymous DJ',
+          ownerId: userId,
+          genre: data.genre || 'Sin información',
+          description: data.description || 'Sin información',
+          isOnline: true,
+          listenersCount: 0,
+          currentTrack: null,
+          createdAt: new Date().toISOString()
+        };
+      }
       
-      await Cache.cacheWave(wave.waveId, wave);
+      try { await Cache.cacheWave(wave.waveId, wave); } catch(e) { /* ignore cache errors */ }
       memoryWaves.set(wave.waveId, wave);
       
       const waveId = wave.waveId;
@@ -128,10 +149,10 @@ module.exports = (io, socket) => {
       socket.join(waveId);
       io.emit('wave-online', wave);
       
-      logger.info(`EMISOR_CREATED_WAVE: User ${userId} created wave "${wave.name}" with TRANSACTION`);
+      logger.info(`EMISOR_CREATED_WAVE: User ${userId} created wave "${wave.name}"`);
     } catch (error) {
       logger.error(`CREATE_WAVE_ERROR: ${error.message}`);
-      socket.emit('error', { message: 'Failed to create wave' });
+      socket.emit('error', { message: 'Failed to create wave: ' + error.message });
     }
   });
 
@@ -139,24 +160,24 @@ module.exports = (io, socket) => {
     const { waveId, userId } = data;
     
     try {
-      await Wave.stopWithTransaction(waveId, userId);
+      try { await Wave.stopWithTransaction(waveId, userId); } catch(e) {
+        logger.warn(`STOP_WAVE_DB_FALLBACK: ${e.message}`);
+      }
       
       activeWaves.delete(waveId);
       memoryWaves.delete(waveId);
       
-      // Clean up emisor state and cancel any pending timers
       const state = emisorState.get(waveId);
       if (state && state.offlineTimer) clearTimeout(state.offlineTimer);
       emisorState.delete(waveId);
       
-      // Clean up related modules
       voiceSocket.cleanupWave(waveId);
       qualitySocket.cleanupWave(waveId);
       
       io.emit('wave-offline', { waveId });
       io.to(waveId).emit('emisor-state', { waveId, state: 'offline' });
       
-      logger.info(`WAVE_STOPPED: User ${userId} stopped wave ${waveId} with TRANSACTION`);
+      logger.info(`WAVE_STOPPED: User ${userId} stopped wave ${waveId}`);
     } catch (error) {
       logger.error(`STOP_WAVE_ERROR: ${error.message}`);
     }
@@ -168,8 +189,13 @@ module.exports = (io, socket) => {
     try {
       socket.join(waveId);
       
-      // Use transaction to join wave and create session atomically
-      const sessionId = await Wave.joinWithTransaction(waveId, userId);
+      let sessionId;
+      try {
+        sessionId = await Wave.joinWithTransaction(waveId, userId);
+      } catch(e) {
+        logger.warn(`JOIN_WAVE_DB_FALLBACK: ${e.message}`);
+        sessionId = require('uuid').v4();
+      }
       socket.sessionId = sessionId;
       
       if (activeWaves.has(waveId)) {
@@ -177,7 +203,7 @@ module.exports = (io, socket) => {
         const count = activeWaves.get(waveId).listeners.size;
         
         io.emit('listeners-update', { waveId, count });
-        logger.info(`OYENTE_JOINED_WAVE: User ${userId} joined wave ${waveId} with TRANSACTION, session: ${sessionId}`);
+        logger.info(`OYENTE_JOINED_WAVE: User ${userId} joined wave ${waveId}`);
         
         socket.to(waveId).emit('listener_joined', {
           userId,
@@ -197,20 +223,20 @@ module.exports = (io, socket) => {
     try {
       socket.leave(waveId);
       
-      // Use transaction to leave wave and update session atomically
       if (socket.sessionId) {
-        await Wave.leaveWithTransaction(waveId, socket.sessionId);
+        try { await Wave.leaveWithTransaction(waveId, socket.sessionId); } catch(e) {
+          logger.warn(`LEAVE_WAVE_DB_FALLBACK: ${e.message}`);
+        }
       }
       
       if (activeWaves.has(waveId)) {
         activeWaves.get(waveId).listeners.delete(userId);
         const count = activeWaves.get(waveId).listeners.size;
         
-        // Clean up quality report for this listener
         qualitySocket.removeListener(waveId, userId);
         
         io.emit('listeners-update', { waveId, count });
-        logger.info(`USER_LEFT_WAVE: User ${userId} left wave ${waveId} with TRANSACTION`);
+        logger.info(`USER_LEFT_WAVE: User ${userId} left wave ${waveId}`);
       }
     } catch (error) {
       logger.error(`LEAVE_WAVE_ERROR: ${error.message}`);
@@ -219,13 +245,23 @@ module.exports = (io, socket) => {
 
   socket.on('update-wave', async (data) => {
     try {
-      const wave = await Wave.update(data.waveId, {
-        name: data.name,
-        djName: data.djName
-      });
+      const updates = {};
+      if (data.name) updates.name = data.name;
+      if (data.djName) updates.djName = data.djName;
+      if (data.genre) updates.genre = data.genre;
+      if (data.description) updates.description = data.description;
       
-      io.to(data.waveId).emit('wave-updated', wave);
-      logger.info(`WAVE_UPDATED: Wave ${data.waveId} updated to name "${wave.name}" DJ "${wave.djName}"`);
+      try { await Wave.update(data.waveId, updates); } catch(e) {
+        logger.warn(`UPDATE_WAVE_DB_FALLBACK: ${e.message}`);
+      }
+      
+      if (memoryWaves.has(data.waveId)) {
+        const mw = memoryWaves.get(data.waveId);
+        Object.assign(mw, updates);
+      }
+      
+      io.to(data.waveId).emit('wave-updated', { ...memoryWaves.get(data.waveId), ...updates, waveId: data.waveId });
+      logger.info(`WAVE_UPDATED: Wave ${data.waveId} updated`);
     } catch (error) {
       logger.error(`UPDATE_WAVE_ERROR: ${error.message}`);
       socket.emit('error', { message: 'Failed to update wave' });
