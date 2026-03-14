@@ -64,7 +64,6 @@ class LiveKitService {
         console.log(`🎙️ Voice room already exists: voice_${roomId}`);
         return `voice_${roomId}`;
       }
-      console.error('Error creating voice room:', error);
       throw error;
     }
   }
