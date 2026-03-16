@@ -17,10 +17,6 @@ const logSocket = require('./sockets/log.socket');
 const hlsService = require('./services/hls.service');
 const liveKitService = require('./services/livekit.service');
 const Cache = require('./models/Cache');
-const { S3Client, ListObjectsV2Command } = require('@aws-sdk/client-s3');
-
-const s3 = new S3Client({ region: 'us-east-1' });
-const S3_BUCKET = 'wavy-music-372714114281';
 
 const app = express();
 const server = http.createServer(app);
@@ -80,30 +76,6 @@ app.post('/api/rooms/:roomId/voice-token', async (req, res) => {
   }
 });
 
-// S3 Music listing
-app.get('/api/music', async (req, res) => {
-  try {
-    const { Contents = [] } = await s3.send(new ListObjectsV2Command({
-      Bucket: S3_BUCKET,
-      Prefix: 'music/'
-    }));
-    const tracks = Contents
-      .filter(obj => obj.Key !== 'music/' && obj.Size > 0)
-      .map(obj => {
-        const filename = decodeURIComponent(obj.Key.replace('music/', '').replace(/\+/g, ' '));
-        const name = filename.replace(/\.[^.]+$/, '');
-        return {
-          title: name,
-          url: `https://${S3_BUCKET}.s3.us-east-1.amazonaws.com/${obj.Key}`,
-          size: obj.Size
-        };
-      });
-    res.json({ tracks });
-  } catch (error) {
-    console.error('S3 list error:', error.message);
-    res.status(500).json({ tracks: [], error: error.message });
-  }
-});
 
 // Socket.IO
 io.on('connection', (socket) => {

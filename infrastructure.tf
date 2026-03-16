@@ -1,5 +1,5 @@
 # WAVY Backend - Infraestructura AWS 100% Free Tier
-# EC2 t2.micro + DynamoDB + S3 + Lambda + EventBridge
+# EC2 t2.micro + DynamoDB + Lambda + EventBridge
 
 terraform {
   required_version = ">= 1.0"
@@ -176,39 +176,6 @@ resource "aws_dynamodb_table" "sessions" {
   tags = { Name = "${var.project_name}-sessions" }
 }
 
-# ============================================
-# S3 Bucket for Music (Free Tier: 5GB)
-# ============================================
-
-resource "aws_s3_bucket" "music" {
-  bucket = "wavy-music-${var.aws_account_id}"
-  tags   = { Name = "wavy-music" }
-}
-
-resource "aws_s3_bucket_public_access_block" "music" {
-  bucket = aws_s3_bucket.music.id
-
-  block_public_acls       = false
-  block_public_policy     = false
-  ignore_public_acls      = false
-  restrict_public_buckets = false
-}
-
-resource "aws_s3_bucket_policy" "music_read" {
-  bucket     = aws_s3_bucket.music.id
-  depends_on = [aws_s3_bucket_public_access_block.music]
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Sid       = "PublicReadMusic"
-      Effect    = "Allow"
-      Principal = "*"
-      Action    = "s3:GetObject"
-      Resource  = "${aws_s3_bucket.music.arn}/music/*"
-    }]
-  })
-}
 
 # ============================================
 # ECR Repository (Free Tier: 500MB)
@@ -360,16 +327,6 @@ resource "aws_iam_role_policy" "ec2_app" {
           "${aws_dynamodb_table.tracks.arn}/index/*",
           "${aws_dynamodb_table.sessions.arn}/index/*"
         ]
-      },
-      {
-        Effect   = "Allow"
-        Action   = ["s3:ListBucket"]
-        Resource = [aws_s3_bucket.music.arn]
-      },
-      {
-        Effect   = "Allow"
-        Action   = ["s3:GetObject"]
-        Resource = ["${aws_s3_bucket.music.arn}/*"]
       },
       {
         Effect   = "Allow"
@@ -647,10 +604,6 @@ output "dynamodb_tables" {
   }
 }
 
-output "s3_music_bucket" {
-  description = "S3 music bucket name"
-  value       = aws_s3_bucket.music.bucket
-}
 
 output "schedule" {
   description = "Service schedule"
