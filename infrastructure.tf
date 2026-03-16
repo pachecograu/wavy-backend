@@ -1,5 +1,5 @@
-# WAVY Backend - Infraestructura AWS Free Tier
-# Terraform configuration para desplegar en cualquier cuenta AWS
+# WAVY Backend - Infraestructura AWS 100% Free Tier
+# EC2 t2.micro + DynamoDB + S3 + Lambda + EventBridge
 
 terraform {
   required_version = ">= 1.0"
@@ -8,9 +8,9 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
-    random = {
-      source  = "hashicorp/random"
-      version = "~> 3.0"
+    archive = {
+      source  = "hashicorp/archive"
+      version = "~> 2.0"
     }
   }
 }
@@ -32,16 +32,60 @@ variable "project_name" {
   default     = "wavy-backend"
 }
 
+variable "livekit_api_key" {
+  description = "LiveKit API Key"
+  type        = string
+  sensitive   = true
+}
+
+variable "livekit_api_secret" {
+  description = "LiveKit API Secret"
+  type        = string
+  sensitive   = true
+}
+
+variable "jwt_secret" {
+  description = "JWT Secret"
+  type        = string
+  sensitive   = true
+}
+
 provider "aws" {
   region = var.aws_region
 }
 
+data "aws_vpc" "default" {
+  default = true
+}
+
+data "aws_subnets" "default" {
+  filter {
+    name   = "vpc-id"
+    values = [data.aws_vpc.default.id]
+  }
+}
+
+data "aws_ami" "amazon_linux" {
+  most_recent = true
+  owners      = ["amazon"]
+
+  filter {
+    name   = "name"
+    values = ["al2023-ami-*-x86_64"]
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+}
+
 # ============================================
-# DynamoDB Tables (100% Free Tier)
+# DynamoDB Tables (Free Tier: 25GB storage)
 # ============================================
 
 resource "aws_dynamodb_table" "waves" {
-  name         = "${var.project_name}-waves"
+  name         = "wavy-waves"
   billing_mode = "PAY_PER_REQUEST"
   hash_key     = "waveId"
 
@@ -50,14 +94,11 @@ resource "aws_dynamodb_table" "waves" {
     type = "S"
   }
 
-  tags = {
-    Name        = "${var.project_name}-waves"
-    Environment = "production"
-  }
+  tags = { Name = "wavy-waves" }
 }
 
 resource "aws_dynamodb_table" "users" {
-  name         = "${var.project_name}-users"
+  name         = "wavy-users"
   billing_mode = "PAY_PER_REQUEST"
   hash_key     = "userId"
 
@@ -66,14 +107,11 @@ resource "aws_dynamodb_table" "users" {
     type = "S"
   }
 
-  tags = {
-    Name        = "${var.project_name}-users"
-    Environment = "production"
-  }
+  tags = { Name = "wavy-users" }
 }
 
 resource "aws_dynamodb_table" "tracks" {
-  name         = "${var.project_name}-tracks"
+  name         = "wavy-tracks"
   billing_mode = "PAY_PER_REQUEST"
   hash_key     = "trackId"
 
@@ -93,13 +131,9 @@ resource "aws_dynamodb_table" "tracks" {
     projection_type = "ALL"
   }
 
-  tags = {
-    Name        = "${var.project_name}-tracks"
-    Environment = "production"
-  }
+  tags = { Name = "wavy-tracks" }
 }
 
-# Cache table with TTL for token caching
 resource "aws_dynamodb_table" "cache" {
   name         = "${var.project_name}-cache"
   billing_mode = "PAY_PER_REQUEST"
@@ -115,13 +149,9 @@ resource "aws_dynamodb_table" "cache" {
     enabled        = true
   }
 
-  tags = {
-    Name        = "${var.project_name}-cache"
-    Environment = "production"
-  }
+  tags = { Name = "${var.project_name}-cache" }
 }
 
-# Sessions table for tracking user sessions in waves
 resource "aws_dynamodb_table" "sessions" {
   name         = "${var.project_name}-sessions"
   billing_mode = "PAY_PER_REQUEST"
@@ -143,14 +173,45 @@ resource "aws_dynamodb_table" "sessions" {
     projection_type = "ALL"
   }
 
-  tags = {
-    Name        = "${var.project_name}-sessions"
-    Environment = "production"
-  }
+  tags = { Name = "${var.project_name}-sessions" }
 }
 
 # ============================================
-# ECR Repository
+# S3 Bucket for Music (Free Tier: 5GB)
+# ============================================
+
+resource "aws_s3_bucket" "music" {
+  bucket = "wavy-music-${var.aws_account_id}"
+  tags   = { Name = "wavy-music" }
+}
+
+resource "aws_s3_bucket_public_access_block" "music" {
+  bucket = aws_s3_bucket.music.id
+
+  block_public_acls       = false
+  block_public_policy     = false
+  ignore_public_acls      = false
+  restrict_public_buckets = false
+}
+
+resource "aws_s3_bucket_policy" "music_read" {
+  bucket     = aws_s3_bucket.music.id
+  depends_on = [aws_s3_bucket_public_access_block.music]
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid       = "PublicReadMusic"
+      Effect    = "Allow"
+      Principal = "*"
+      Action    = "s3:GetObject"
+      Resource  = "${aws_s3_bucket.music.arn}/music/*"
+    }]
+  })
+}
+
+# ============================================
+# ECR Repository (Free Tier: 500MB)
 # ============================================
 
 resource "aws_ecr_repository" "app" {
@@ -160,9 +221,7 @@ resource "aws_ecr_repository" "app" {
     scan_on_push = false
   }
 
-  tags = {
-    Name = var.project_name
-  }
+  tags = { Name = var.project_name }
 }
 
 resource "aws_ecr_lifecycle_policy" "app" {
@@ -171,103 +230,41 @@ resource "aws_ecr_lifecycle_policy" "app" {
   policy = jsonencode({
     rules = [{
       rulePriority = 1
-      description  = "Keep only 3 images"
+      description  = "Keep only 2 images"
       selection = {
         tagStatus   = "any"
         countType   = "imageCountMoreThan"
-        countNumber = 3
+        countNumber = 2
       }
-      action = {
-        type = "expire"
-      }
+      action = { type = "expire" }
     }]
   })
 }
 
 # ============================================
-# ECS Cluster
-# ============================================
-
-resource "aws_ecs_cluster" "main" {
-  name = "${var.project_name}-cluster"
-
-  tags = {
-    Name = "${var.project_name}-cluster"
-  }
-}
-
-# ============================================
-# CloudWatch Logs
+# CloudWatch Logs (Free Tier: 5GB ingestion)
 # ============================================
 
 resource "aws_cloudwatch_log_group" "app" {
-  name              = "/ecs/${var.project_name}"
-  retention_in_days = 7
-
-  tags = {
-    Name = var.project_name
-  }
+  name              = "/${var.project_name}"
+  retention_in_days = 3
+  tags              = { Name = var.project_name }
 }
 
 # ============================================
-# VPC & Security Groups
+# Security Group for EC2
 # ============================================
 
-data "aws_vpc" "default" {
-  default = true
-}
-
-data "aws_subnets" "default" {
-  filter {
-    name   = "vpc-id"
-    values = [data.aws_vpc.default.id]
-  }
-}
-
-# Security Group for ALB
-resource "aws_security_group" "alb" {
-  name_prefix = "${var.project_name}-alb-"
+resource "aws_security_group" "ec2" {
+  name_prefix = "${var.project_name}-ec2-"
   vpc_id      = data.aws_vpc.default.id
-
-  ingress {
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-    description = "HTTP from internet"
-  }
 
   ingress {
     from_port   = 3000
     to_port     = 3000
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
-    description = "WebSocket from internet"
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  tags = {
-    Name = "${var.project_name}-alb-sg"
-  }
-}
-
-# Security Group for ECS
-resource "aws_security_group" "ecs" {
-  name_prefix = "${var.project_name}-ecs-"
-  vpc_id      = data.aws_vpc.default.id
-
-  ingress {
-    from_port       = 3000
-    to_port         = 3000
-    protocol        = "tcp"
-    security_groups = [aws_security_group.alb.id]
-    description     = "Allow traffic from ALB"
+    description = "Backend API + WebSocket"
   }
 
   ingress {
@@ -294,6 +291,22 @@ resource "aws_security_group" "ecs" {
     description = "LiveKit"
   }
 
+  ingress {
+    from_port   = 50000
+    to_port     = 60000
+    protocol    = "udp"
+    cidr_blocks = ["0.0.0.0/0"]
+    description = "WebRTC UDP"
+  }
+
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+    description = "SSH"
+  }
+
   egress {
     from_port   = 0
     to_port     = 0
@@ -301,219 +314,173 @@ resource "aws_security_group" "ecs" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  tags = {
-    Name = "${var.project_name}-ecs-sg"
-  }
+  tags = { Name = "${var.project_name}-ec2-sg" }
 }
 
 # ============================================
-# IAM Roles
+# IAM Role for EC2
 # ============================================
 
-resource "aws_iam_role" "ecs_task_execution" {
-  name = "${var.project_name}-ecs-task-execution-role"
+resource "aws_iam_role" "ec2" {
+  name = "${var.project_name}-ec2-role"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Action = "sts:AssumeRole"
-      Effect = "Allow"
-      Principal = {
-        Service = "ecs-tasks.amazonaws.com"
-      }
+      Action    = "sts:AssumeRole"
+      Effect    = "Allow"
+      Principal = { Service = "ec2.amazonaws.com" }
     }]
   })
 }
 
-resource "aws_iam_role_policy_attachment" "ecs_task_execution" {
-  role       = aws_iam_role.ecs_task_execution.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
-}
-
-resource "aws_iam_role" "ecs_task" {
-  name = "${var.project_name}-ecs-task-role"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Action = "sts:AssumeRole"
-      Effect = "Allow"
-      Principal = {
-        Service = "ecs-tasks.amazonaws.com"
-      }
-    }]
-  })
-}
-
-resource "aws_iam_role_policy" "ecs_task_dynamodb" {
-  name = "dynamodb-access"
-  role = aws_iam_role.ecs_task.id
+resource "aws_iam_role_policy" "ec2_app" {
+  name = "app-access"
+  role = aws_iam_role.ec2.id
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [{
-      Effect = "Allow"
-      Action = [
-        "dynamodb:PutItem",
-        "dynamodb:GetItem",
-        "dynamodb:UpdateItem",
-        "dynamodb:DeleteItem",
-        "dynamodb:Query",
-        "dynamodb:Scan"
-      ]
-      Resource = [
-        aws_dynamodb_table.waves.arn,
-        aws_dynamodb_table.users.arn,
-        aws_dynamodb_table.tracks.arn,
-        aws_dynamodb_table.cache.arn,
-        aws_dynamodb_table.sessions.arn,
-        "${aws_dynamodb_table.tracks.arn}/index/*",
-        "${aws_dynamodb_table.sessions.arn}/index/*"
-      ]
-    }]
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "dynamodb:PutItem",
+          "dynamodb:GetItem",
+          "dynamodb:UpdateItem",
+          "dynamodb:DeleteItem",
+          "dynamodb:Query",
+          "dynamodb:Scan"
+        ]
+        Resource = [
+          aws_dynamodb_table.waves.arn,
+          aws_dynamodb_table.users.arn,
+          aws_dynamodb_table.tracks.arn,
+          aws_dynamodb_table.cache.arn,
+          aws_dynamodb_table.sessions.arn,
+          "${aws_dynamodb_table.tracks.arn}/index/*",
+          "${aws_dynamodb_table.sessions.arn}/index/*"
+        ]
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["s3:ListBucket"]
+        Resource = [aws_s3_bucket.music.arn]
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["s3:GetObject"]
+        Resource = ["${aws_s3_bucket.music.arn}/*"]
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["ecr:GetAuthorizationToken"]
+        Resource = ["*"]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "ecr:BatchGetImage",
+          "ecr:GetDownloadUrlForLayer"
+        ]
+        Resource = [aws_ecr_repository.app.arn]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ]
+        Resource = ["${aws_cloudwatch_log_group.app.arn}:*"]
+      }
+    ]
   })
 }
 
-# ============================================
-# Application Load Balancer
-# ============================================
-
-resource "aws_lb" "main" {
-  name               = "${var.project_name}-alb"
-  internal           = false
-  load_balancer_type = "application"
-  security_groups    = [aws_security_group.alb.id]
-  subnets            = data.aws_subnets.default.ids
-
-  enable_deletion_protection = false
-  enable_http2              = true
-
-  tags = {
-    Name = "${var.project_name}-alb"
-  }
-}
-
-resource "aws_lb_target_group" "app" {
-  name        = "${var.project_name}-tg"
-  port        = 3000
-  protocol    = "HTTP"
-  vpc_id      = data.aws_vpc.default.id
-  target_type = "ip"
-
-  health_check {
-    enabled             = true
-    healthy_threshold   = 2
-    unhealthy_threshold = 3
-    timeout             = 5
-    interval            = 30
-    path                = "/health"
-    protocol            = "HTTP"
-    matcher             = "200"
-  }
-
-  stickiness {
-    enabled         = true
-    type            = "lb_cookie"
-    cookie_duration = 86400
-  }
-
-  tags = {
-    Name = "${var.project_name}-tg"
-  }
-}
-
-resource "aws_lb_listener" "http" {
-  load_balancer_arn = aws_lb.main.arn
-  port              = "80"
-  protocol          = "HTTP"
-
-  default_action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.app.arn
-  }
+resource "aws_iam_instance_profile" "ec2" {
+  name = "${var.project_name}-ec2-profile"
+  role = aws_iam_role.ec2.name
 }
 
 # ============================================
-# ECS Task Definition
+# EC2 Instance (Free Tier: t2.micro 750hrs/mo)
 # ============================================
 
-resource "aws_ecs_task_definition" "app" {
-  family                   = var.project_name
-  network_mode             = "awsvpc"
-  requires_compatibilities = ["FARGATE"]
-  cpu                      = "256"
-  memory                   = "512"
-  execution_role_arn       = aws_iam_role.ecs_task_execution.arn
-  task_role_arn            = aws_iam_role.ecs_task.arn
+resource "aws_instance" "app" {
+  ami                    = data.aws_ami.amazon_linux.id
+  instance_type          = "t2.micro"
+  iam_instance_profile   = aws_iam_instance_profile.ec2.name
+  vpc_security_group_ids = [aws_security_group.ec2.id]
+  subnet_id              = data.aws_subnets.default.ids[0]
 
-  container_definitions = jsonencode([{
-    name  = var.project_name
-    image = "${aws_ecr_repository.app.repository_url}:latest"
+  associate_public_ip_address = true
 
-    portMappings = [
-      { containerPort = 3000, protocol = "tcp" },
-      { containerPort = 1935, protocol = "tcp" },
-      { containerPort = 8000, protocol = "tcp" },
-      { containerPort = 7880, protocol = "tcp" }
-    ]
+  root_block_device {
+    volume_size = 8
+    volume_type = "gp3"
+  }
 
-    environment = [
-      { name = "NODE_ENV", value = "production" },
-      { name = "PORT", value = "3000" },
-      { name = "AWS_REGION", value = var.aws_region }
-    ]
+  user_data = base64encode(<<-EOF
+    #!/bin/bash
+    set -e
+    yum update -y
+    yum install -y docker
+    systemctl enable docker
+    systemctl start docker
+    usermod -aG docker ec2-user
 
-    logConfiguration = {
-      logDriver = "awslogs"
-      options = {
-        "awslogs-group"         = aws_cloudwatch_log_group.app.name
-        "awslogs-region"        = var.aws_region
-        "awslogs-stream-prefix" = "ecs"
-      }
-    }
+    # Create startup script
+    cat > /home/ec2-user/start-wavy.sh << 'SCRIPT'
+    #!/bin/bash
+    REGION="${var.aws_region}"
+    ACCOUNT="${var.aws_account_id}"
+    REPO="$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/${var.project_name}"
+    PUBLIC_IP=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4 || echo "localhost")
 
-    healthCheck = {
-      command     = ["CMD-SHELL", "curl -f http://localhost:3000/health || exit 1"]
-      interval    = 30
-      timeout     = 5
-      retries     = 3
-      startPeriod = 60
-    }
+    aws ecr get-login-password --region $REGION | docker login --username AWS --password-stdin $ACCOUNT.dkr.ecr.$REGION.amazonaws.com
+    docker pull $REPO:latest
+    docker stop wavy 2>/dev/null; docker rm wavy 2>/dev/null
 
-    essential = true
-  }])
+    docker run -d --restart=always --name wavy \
+      -p 3000:3000 -p 1935:1935 -p 8000:8000 -p 7880:7880 \
+      -e NODE_ENV=production \
+      -e PORT=3000 \
+      -e AWS_REGION=$REGION \
+      -e LIVEKIT_API_KEY=${var.livekit_api_key} \
+      -e LIVEKIT_API_SECRET=${var.livekit_api_secret} \
+      -e LIVEKIT_URL=ws://localhost:7880 \
+      -e PUBLIC_HOST=$PUBLIC_IP \
+      -e JWT_SECRET=${var.jwt_secret} \
+      $REPO:latest
+    SCRIPT
+    chmod +x /home/ec2-user/start-wavy.sh
+
+    # Create systemd service to run on boot
+    cat > /etc/systemd/system/wavy.service << 'SVC'
+    [Unit]
+    Description=WAVY Backend
+    After=docker.service
+    Requires=docker.service
+
+    [Service]
+    Type=oneshot
+    RemainAfterExit=yes
+    ExecStart=/home/ec2-user/start-wavy.sh
+
+    [Install]
+    WantedBy=multi-user.target
+    SVC
+    systemctl enable wavy.service
+
+    # Run now
+    /home/ec2-user/start-wavy.sh
+  EOF
+  )
+
+  tags = { Name = var.project_name }
 }
 
 # ============================================
-# ECS Service
-# ============================================
-
-resource "aws_ecs_service" "app" {
-  name            = "${var.project_name}-service"
-  cluster         = aws_ecs_cluster.main.id
-  task_definition = aws_ecs_task_definition.app.arn
-  desired_count   = 1
-  launch_type     = "FARGATE"
-
-  network_configuration {
-    subnets          = data.aws_subnets.default.ids
-    security_groups  = [aws_security_group.ecs.id]
-    assign_public_ip = true
-  }
-
-  load_balancer {
-    target_group_arn = aws_lb_target_group.app.arn
-    container_name   = var.project_name
-    container_port   = 3000
-  }
-
-  health_check_grace_period_seconds = 60
-
-  depends_on = [aws_lb_listener.http]
-}
-
-# ============================================
-# Lambda for Auto-Stop
+# Lambda Start/Stop (Free Tier: 1M req/mo)
 # ============================================
 
 resource "aws_iam_role" "lambda" {
@@ -522,130 +489,101 @@ resource "aws_iam_role" "lambda" {
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Action = "sts:AssumeRole"
-      Effect = "Allow"
-      Principal = {
-        Service = "lambda.amazonaws.com"
-      }
+      Action    = "sts:AssumeRole"
+      Effect    = "Allow"
+      Principal = { Service = "lambda.amazonaws.com" }
     }]
   })
 }
 
-resource "aws_iam_role_policy" "lambda_ecs" {
-  name = "ecs-policy"
+resource "aws_iam_role_policy" "lambda_ec2" {
+  name = "ec2-startstop"
   role = aws_iam_role.lambda.id
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [{
-      Effect = "Allow"
-      Action = [
-        "ecs:UpdateService",
-        "logs:CreateLogGroup",
-        "logs:CreateLogStream",
-        "logs:PutLogEvents"
-      ]
-      Resource = "*"
-    }]
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["ec2:StartInstances", "ec2:StopInstances"]
+        Resource = [aws_instance.app.arn]
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
+        Resource = ["*"]
+      }
+    ]
   })
 }
 
-data "archive_file" "lambda" {
+data "archive_file" "lambda_stop" {
   type        = "zip"
   output_path = "${path.module}/lambda_stop.zip"
 
   source {
-    content  = <<EOF
-import boto3
+    content  = <<-PYEOF
+      import boto3
+      def lambda_handler(event, context):
+          boto3.client('ec2').stop_instances(InstanceIds=['${aws_instance.app.id}'])
+          return {'statusCode': 200, 'body': 'Stopped'}
+    PYEOF
+    filename = "lambda_function.py"
+  }
+}
 
-def lambda_handler(event, context):
-    ecs = boto3.client('ecs')
-    ecs.update_service(
-        cluster='${var.project_name}-cluster',
-        service='${var.project_name}-service',
-        desiredCount=0
-    )
-    return {'statusCode': 200, 'body': 'Service stopped'}
-EOF
-    filename = "lambda_stop.py"
+data "archive_file" "lambda_start" {
+  type        = "zip"
+  output_path = "${path.module}/lambda_start.zip"
+
+  source {
+    content  = <<-PYEOF
+      import boto3
+      def lambda_handler(event, context):
+          boto3.client('ec2').start_instances(InstanceIds=['${aws_instance.app.id}'])
+          return {'statusCode': 200, 'body': 'Started'}
+    PYEOF
+    filename = "lambda_function.py"
   }
 }
 
 resource "aws_lambda_function" "stop_service" {
-  filename      = data.archive_file.lambda.output_path
-  function_name = "${var.project_name}-stop-service"
-  role          = aws_iam_role.lambda.arn
-  handler       = "lambda_stop.lambda_handler"
-  runtime       = "python3.11"
+  filename         = data.archive_file.lambda_stop.output_path
+  function_name    = "${var.project_name}-stop"
+  role             = aws_iam_role.lambda.arn
+  handler          = "lambda_function.lambda_handler"
+  runtime          = "python3.12"
+  source_code_hash = data.archive_file.lambda_stop.output_base64sha256
+}
 
-  source_code_hash = data.archive_file.lambda.output_base64sha256
+resource "aws_lambda_function" "start_service" {
+  filename         = data.archive_file.lambda_start.output_path
+  function_name    = "${var.project_name}-start"
+  role             = aws_iam_role.lambda.arn
+  handler          = "lambda_function.lambda_handler"
+  runtime          = "python3.12"
+  source_code_hash = data.archive_file.lambda_start.output_base64sha256
 }
 
 # ============================================
 # EventBridge Rules (8 AM - 4 PM COT)
 # ============================================
 
-resource "aws_iam_role" "eventbridge" {
-  name = "${var.project_name}-eventbridge-role"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Action = "sts:AssumeRole"
-      Effect = "Allow"
-      Principal = {
-        Service = "events.amazonaws.com"
-      }
-    }]
-  })
-}
-
-resource "aws_iam_role_policy" "eventbridge_ecs" {
-  name = "ecs-policy"
-  role = aws_iam_role.eventbridge.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect   = "Allow"
-      Action   = ["ecs:RunTask"]
-      Resource = aws_ecs_task_definition.app.arn
-    }, {
-      Effect   = "Allow"
-      Action   = ["iam:PassRole"]
-      Resource = "*"
-    }]
-  })
-}
-
 resource "aws_cloudwatch_event_rule" "start_service" {
-  name                = "${var.project_name}-start-service"
-  description         = "Start service at 8 AM COT"
+  name                = "${var.project_name}-start"
+  description         = "Start EC2 at 8 AM COT (13 UTC)"
   schedule_expression = "cron(0 13 ? * MON-FRI *)"
 }
 
 resource "aws_cloudwatch_event_rule" "stop_service" {
-  name                = "${var.project_name}-stop-service"
-  description         = "Stop service at 4 PM COT"
+  name                = "${var.project_name}-stop"
+  description         = "Stop EC2 at 4 PM COT (21 UTC)"
   schedule_expression = "cron(0 21 ? * MON-FRI *)"
 }
 
 resource "aws_cloudwatch_event_target" "start_service" {
-  rule     = aws_cloudwatch_event_rule.start_service.name
-  arn      = aws_ecs_cluster.main.arn
-  role_arn = aws_iam_role.eventbridge.arn
-
-  ecs_target {
-    task_count          = 1
-    task_definition_arn = aws_ecs_task_definition.app.arn
-    launch_type         = "FARGATE"
-
-    network_configuration {
-      subnets          = data.aws_subnets.default.ids
-      security_groups  = [aws_security_group.ecs.id]
-      assign_public_ip = true
-    }
-  }
+  rule = aws_cloudwatch_event_rule.start_service.name
+  arn  = aws_lambda_function.start_service.arn
 }
 
 resource "aws_cloudwatch_event_target" "stop_service" {
@@ -653,8 +591,16 @@ resource "aws_cloudwatch_event_target" "stop_service" {
   arn  = aws_lambda_function.stop_service.arn
 }
 
-resource "aws_lambda_permission" "eventbridge" {
-  statement_id  = "AllowEventBridgeInvoke"
+resource "aws_lambda_permission" "start_eventbridge" {
+  statement_id  = "AllowEventBridgeStart"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.start_service.function_name
+  principal     = "events.amazonaws.com"
+  source_arn    = aws_cloudwatch_event_rule.start_service.arn
+}
+
+resource "aws_lambda_permission" "stop_eventbridge" {
+  statement_id  = "AllowEventBridgeStop"
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.stop_service.function_name
   principal     = "events.amazonaws.com"
@@ -665,14 +611,19 @@ resource "aws_lambda_permission" "eventbridge" {
 # Outputs
 # ============================================
 
-output "alb_dns_name" {
-  description = "ALB DNS name"
-  value       = aws_lb.main.dns_name
+output "ec2_public_ip" {
+  description = "EC2 public IP"
+  value       = aws_instance.app.public_ip
 }
 
-output "alb_url" {
-  description = "ALB URL"
-  value       = "http://${aws_lb.main.dns_name}"
+output "app_url" {
+  description = "Backend URL"
+  value       = "http://${aws_instance.app.public_ip}:3000"
+}
+
+output "websocket_url" {
+  description = "WebSocket URL"
+  value       = "ws://${aws_instance.app.public_ip}:3000"
 }
 
 output "ecr_repository_url" {
@@ -680,14 +631,9 @@ output "ecr_repository_url" {
   value       = aws_ecr_repository.app.repository_url
 }
 
-output "ecs_cluster_name" {
-  description = "ECS cluster name"
-  value       = aws_ecs_cluster.main.name
-}
-
-output "ecs_service_name" {
-  description = "ECS service name"
-  value       = aws_ecs_service.app.name
+output "instance_id" {
+  description = "EC2 instance ID"
+  value       = aws_instance.app.id
 }
 
 output "dynamodb_tables" {
@@ -699,6 +645,11 @@ output "dynamodb_tables" {
     cache    = aws_dynamodb_table.cache.name
     sessions = aws_dynamodb_table.sessions.name
   }
+}
+
+output "s3_music_bucket" {
+  description = "S3 music bucket name"
+  value       = aws_s3_bucket.music.bucket
 }
 
 output "schedule" {
