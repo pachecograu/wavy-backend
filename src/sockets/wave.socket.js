@@ -347,12 +347,11 @@ module.exports = (io, socket) => {
   });
 
   socket.on('playback-sync', (data) => {
-    const { waveId, currentTime, isPlaying } = data;
+    const { waveId, action, currentTime } = data;
     
-    // Sync playback state with all listeners
     socket.to(waveId).emit('sync-playback', {
+      action,
       currentTime,
-      isPlaying,
       timestamp: Date.now()
     });
   });
