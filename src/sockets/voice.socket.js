@@ -79,6 +79,14 @@ module.exports = (io, socket) => {
     io.to(waveId).emit('mic-revoked', { waveId, userId });
     logger.info(`MIC_REVOKED: ${userId} in ${waveId}`);
   });
+
+  // Real-time mic audio relay (DJ → oyentes)
+  socket.on('mic-audio', (data) => {
+    const { waveId, audio } = data;
+    if (waveId && audio) {
+      socket.to(waveId).emit('mic-audio-data', { audio });
+    }
+  });
 };
 
 // Export for cleanup from wave.socket.js
