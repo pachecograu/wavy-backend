@@ -7,7 +7,7 @@ const memoryTracks = new Map();
 module.exports = (io, socket) => {
   
   socket.on('update-current-track', async (data) => {
-    const { waveId, title, artist, duration } = data;
+    const { waveId, title, artist, duration, url } = data;
     
     try {
       // Create new current track in DynamoDB
@@ -34,15 +34,17 @@ module.exports = (io, socket) => {
         title,
         artist,
         duration,
+        url,
         isCurrent: true,
         playedAt: new Date()
       });
       
-      // Broadcast to all listeners in the wave
+      // Broadcast to all listeners in the wave (including S3 URL)
       io.to(waveId).emit('current-track-updated', {
         title,
         artist,
         duration,
+        url,
         playedAt: new Date()
       });
       
