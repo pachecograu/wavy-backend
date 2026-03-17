@@ -283,7 +283,7 @@ module.exports = (io, socket) => {
     // Try cache first for each wave
     const waves = [];
     for (const [waveId, wave] of memoryWaves.entries()) {
-      if (wave.isOnline && realConnectedUsers.has(wave.ownerId)) {
+      if (wave.isOnline && activeWaves.has(waveId) && realConnectedUsers.has(wave.ownerId)) {
         const cachedWave = await Cache.getCachedWave(waveId);
         waves.push(cachedWave || wave);
       }
