@@ -9,6 +9,7 @@ const activeWaves = new Map();
 const memoryWaves = new Map();
 const connectedUsers = new Map();
 const userSockets = new Map();
+const playbackState = new Map(); // waveId -> { action, currentTime, timestamp }
 // Track emisor connection state per wave
 const emisorState = new Map(); // waveId -> { userId, state, disconnectedAt }
 const RECONNECT_GRACE_PERIOD = 15000; // 15s grace period before marking wave offline
@@ -166,6 +167,7 @@ module.exports = (io, socket) => {
       
       activeWaves.delete(waveId);
       memoryWaves.delete(waveId);
+      playbackState.delete(waveId);
       
       const state = emisorState.get(waveId);
       if (state && state.offlineTimer) clearTimeout(state.offlineTimer);
@@ -348,12 +350,27 @@ module.exports = (io, socket) => {
 
   socket.on('playback-sync', (data) => {
     const { waveId, action, currentTime } = data;
+    const state = {
+      action,
+      currentTime,
+      timestamp: Date.now(),
+    };
+    playbackState.set(waveId, state);
     
     socket.to(waveId).emit('sync-playback', {
       action,
       currentTime,
       timestamp: Date.now()
     });
+  });
+
+  socket.on('request-playback-state', (data) => {
+    const { waveId } = data || {};
+    if (!waveId) return;
+    const state = playbackState.get(waveId);
+    if (!state) return;
+
+    socket.emit('playback-state', state);
   });
 
   socket.on('audio-chunk', (data) => {
