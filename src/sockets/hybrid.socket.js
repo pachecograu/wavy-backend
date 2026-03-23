@@ -1,4 +1,3 @@
-const hlsService = require('../services/hls.service');
 
 /**
  * Per-room state: roomId -> { users: Map<userId, socketId>, hostUserId, micActive }
@@ -65,8 +64,6 @@ module.exports = (io, socket) => {
 
       socket.emit('hybrid_room_joined', {
         roomId,
-        hlsUrl: hlsService.getStreamUrl(roomId),
-        isStreamActive: hlsService.isStreamActive(roomId),
         hostUserId: room.hostUserId,
         micActive: room.micActive,
       });
@@ -164,8 +161,6 @@ module.exports = (io, socket) => {
     const room = rooms.get(roomId);
     socket.emit('room_status', {
       roomId,
-      hlsUrl: hlsService.getStreamUrl(roomId),
-      isStreamActive: hlsService.isStreamActive(roomId),
       participants: room ? [...room.users.keys()] : [],
       micActive: room?.micActive ?? false,
       hostUserId: room?.hostUserId ?? null,

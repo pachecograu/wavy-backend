@@ -64,28 +64,6 @@ class Cache {
   }
 
   /**
-   * Cache LiveKit token
-   * @param {string} roomId - Room ID
-   * @param {string} userId - User ID
-   * @param {object} tokenData - Token data to cache
-   */
-  static async cacheVoiceToken(roomId, userId, tokenData) {
-    const key = `voice_token:${roomId}:${userId}`;
-    await this.set(key, tokenData, 3600); // 1 hour TTL
-  }
-
-  /**
-   * Get cached LiveKit token
-   * @param {string} roomId - Room ID
-   * @param {string} userId - User ID
-   * @returns {object|null} Cached token or null
-   */
-  static async getCachedVoiceToken(roomId, userId) {
-    const key = `voice_token:${roomId}:${userId}`;
-    return await this.get(key);
-  }
-
-  /**
    * Cache wave data
    * @param {string} waveId - Wave ID
    * @param {object} waveData - Wave data to cache

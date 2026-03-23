@@ -16,12 +16,6 @@ RUN npm ci --only=production && npm cache clean --force
 # Copiar código fuente
 COPY . .
 
-# Crear directorios necesarios
-RUN mkdir -p public/hls logs
-
-# Permisos para directorios
-RUN chmod -R 755 public/hls
-
 # Usuario no-root para seguridad
 RUN addgroup -g 1001 -S nodejs && \
     adduser -S wavy -u 1001 -G nodejs
@@ -32,7 +26,7 @@ RUN chown -R wavy:nodejs /app
 USER wavy
 
 # Exponer puertos
-EXPOSE 3000 1935 8000 7880
+EXPOSE 3000
 
 # Variables de entorno por defecto
 ENV NODE_ENV=production

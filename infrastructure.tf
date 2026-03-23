@@ -1,6 +1,3 @@
-# WAVY Backend - Infraestructura AWS 100% Free Tier
-# EC2 t2.micro + DynamoDB + Lambda + EventBridge
-
 terraform {
   required_version = ">= 1.0"
   required_providers {
@@ -8,51 +5,49 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
-    archive = {
-      source  = "hashicorp/archive"
-      version = "~> 2.0"
-    }
   }
 }
 
 variable "aws_region" {
-  description = "AWS region"
+  description = "AWS region donde está desplegado WAVY"
   type        = string
   default     = "us-east-1"
-}
-
-variable "aws_account_id" {
-  description = "AWS Account ID"
-  type        = string
-}
-
-variable "project_name" {
-  description = "Project name"
-  type        = string
-  default     = "wavy-backend"
-}
-
-variable "livekit_api_key" {
-  description = "LiveKit API Key"
-  type        = string
-  sensitive   = true
-}
-
-variable "livekit_api_secret" {
-  description = "LiveKit API Secret"
-  type        = string
-  sensitive   = true
-}
-
-variable "jwt_secret" {
-  description = "JWT Secret"
-  type        = string
-  sensitive   = true
 }
 
 provider "aws" {
   region = var.aws_region
 }
+
+locals {
+  account_id            = "372714114281"
+  alb_name              = "wavy-alb"
+  ecs_cluster_name      = "wavy-cluster"
+  ecs_service_name      = "wavy-service"
+  ecs_task_family       = "wavy-backend"
+  ecs_container_name    = "wavy-backend"
+  ecr_repository_name   = "wavy-backend"
+  target_group_name     = "wavy-tg"
+  s3_music_bucket       = "wavy-music-372714114281"
+  lambda_stop_name      = "wavy-stop-service"
+  event_rule_start_name = "wavy-start-service"
+  event_rule_stop_name  = "wavy-stop-service"
+  alb_sg_name           = "wavy-alb-sg"
+  ecs_sg_name           = "wavy-ecs-sg"
+
+  dynamodb_tables = {
+    waves    = "wavy-waves"
+    users    = "wavy-users"
+    tracks   = "wavy-tracks"
+    cache    = "wavy-backend-cache"
+    sessions = "wavy-backend-sessions"
+  }
+}
+
+# ============================================================
+# Recursos existentes (estado real en AWS)
+# ============================================================
+
+data "aws_caller_identity" "current" {}
 
 data "aws_vpc" "default" {
   default = true
@@ -65,547 +60,184 @@ data "aws_subnets" "default" {
   }
 }
 
-data "aws_ami" "amazon_linux" {
-  most_recent = true
-  owners      = ["amazon"]
+data "aws_s3_bucket" "music" {
+  bucket = local.s3_music_bucket
+}
+
+data "aws_ecr_repository" "backend" {
+  name = local.ecr_repository_name
+}
+
+data "aws_ecs_cluster" "main" {
+  cluster_name = local.ecs_cluster_name
+}
+
+data "aws_ecs_service" "backend" {
+  cluster_arn  = data.aws_ecs_cluster.main.arn
+  service_name = local.ecs_service_name
+}
+
+data "aws_lb" "alb" {
+  name = local.alb_name
+}
+
+data "aws_lb_target_group" "backend" {
+  name = local.target_group_name
+}
+
+data "aws_security_group" "alb" {
+  filter {
+    name   = "group-name"
+    values = [local.alb_sg_name]
+  }
 
   filter {
-    name   = "name"
-    values = ["al2023-ami-*-x86_64"]
+    name   = "vpc-id"
+    values = [data.aws_vpc.default.id]
+  }
+}
+
+data "aws_security_group" "ecs" {
+  filter {
+    name   = "group-name"
+    values = [local.ecs_sg_name]
   }
 
   filter {
-    name   = "virtualization-type"
-    values = ["hvm"]
+    name   = "vpc-id"
+    values = [data.aws_vpc.default.id]
   }
 }
 
-# ============================================
-# DynamoDB Tables (Free Tier: 25GB storage)
-# ============================================
-
-resource "aws_dynamodb_table" "waves" {
-  name         = "wavy-waves"
-  billing_mode = "PAY_PER_REQUEST"
-  hash_key     = "waveId"
-
-  attribute {
-    name = "waveId"
-    type = "S"
-  }
-
-  tags = { Name = "wavy-waves" }
+data "aws_dynamodb_table" "waves" {
+  name = local.dynamodb_tables.waves
 }
 
-resource "aws_dynamodb_table" "users" {
-  name         = "wavy-users"
-  billing_mode = "PAY_PER_REQUEST"
-  hash_key     = "userId"
-
-  attribute {
-    name = "userId"
-    type = "S"
-  }
-
-  tags = { Name = "wavy-users" }
+data "aws_dynamodb_table" "users" {
+  name = local.dynamodb_tables.users
 }
 
-resource "aws_dynamodb_table" "tracks" {
-  name         = "wavy-tracks"
-  billing_mode = "PAY_PER_REQUEST"
-  hash_key     = "trackId"
-
-  attribute {
-    name = "trackId"
-    type = "S"
-  }
-
-  attribute {
-    name = "waveId"
-    type = "S"
-  }
-
-  global_secondary_index {
-    name            = "waveId-index"
-    hash_key        = "waveId"
-    projection_type = "ALL"
-  }
-
-  tags = { Name = "wavy-tracks" }
+data "aws_dynamodb_table" "tracks" {
+  name = local.dynamodb_tables.tracks
 }
 
-resource "aws_dynamodb_table" "cache" {
-  name         = "${var.project_name}-cache"
-  billing_mode = "PAY_PER_REQUEST"
-  hash_key     = "cacheKey"
-
-  attribute {
-    name = "cacheKey"
-    type = "S"
-  }
-
-  ttl {
-    attribute_name = "ttl"
-    enabled        = true
-  }
-
-  tags = { Name = "${var.project_name}-cache" }
+data "aws_dynamodb_table" "cache" {
+  name = local.dynamodb_tables.cache
 }
 
-resource "aws_dynamodb_table" "sessions" {
-  name         = "${var.project_name}-sessions"
-  billing_mode = "PAY_PER_REQUEST"
-  hash_key     = "sessionId"
-
-  attribute {
-    name = "sessionId"
-    type = "S"
-  }
-
-  attribute {
-    name = "waveId"
-    type = "S"
-  }
-
-  global_secondary_index {
-    name            = "waveId-index"
-    hash_key        = "waveId"
-    projection_type = "ALL"
-  }
-
-  tags = { Name = "${var.project_name}-sessions" }
+data "aws_dynamodb_table" "sessions" {
+  name = local.dynamodb_tables.sessions
 }
 
-
-# ============================================
-# ECR Repository (Free Tier: 500MB)
-# ============================================
-
-resource "aws_ecr_repository" "app" {
-  name = var.project_name
-
-  image_scanning_configuration {
-    scan_on_push = false
-  }
-
-  tags = { Name = var.project_name }
+data "aws_cloudwatch_log_group" "ecs" {
+  name = "/ecs/wavy-backend"
 }
 
-resource "aws_ecr_lifecycle_policy" "app" {
-  repository = aws_ecr_repository.app.name
-
-  policy = jsonencode({
-    rules = [{
-      rulePriority = 1
-      description  = "Keep only 2 images"
-      selection = {
-        tagStatus   = "any"
-        countType   = "imageCountMoreThan"
-        countNumber = 2
-      }
-      action = { type = "expire" }
-    }]
-  })
+data "aws_cloudwatch_log_group" "lambda_stop" {
+  name = "/aws/lambda/wavy-stop-service"
 }
 
-# ============================================
-# CloudWatch Logs (Free Tier: 5GB ingestion)
-# ============================================
-
-resource "aws_cloudwatch_log_group" "app" {
-  name              = "/${var.project_name}"
-  retention_in_days = 3
-  tags              = { Name = var.project_name }
+data "aws_lambda_function" "stop_service" {
+  function_name = local.lambda_stop_name
 }
 
-# ============================================
-# Security Group for EC2
-# ============================================
-
-resource "aws_security_group" "ec2" {
-  name_prefix = "${var.project_name}-ec2-"
-  vpc_id      = data.aws_vpc.default.id
-
-  ingress {
-    from_port   = 3000
-    to_port     = 3000
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-    description = "Backend API + WebSocket"
-  }
-
-  ingress {
-    from_port   = 1935
-    to_port     = 1935
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-    description = "RTMP"
-  }
-
-  ingress {
-    from_port   = 8000
-    to_port     = 8000
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-    description = "HLS"
-  }
-
-  ingress {
-    from_port   = 7880
-    to_port     = 7880
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-    description = "LiveKit"
-  }
-
-  ingress {
-    from_port   = 50000
-    to_port     = 60000
-    protocol    = "udp"
-    cidr_blocks = ["0.0.0.0/0"]
-    description = "WebRTC UDP"
-  }
-
-  ingress {
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-    description = "SSH"
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  tags = { Name = "${var.project_name}-ec2-sg" }
+data "aws_cloudwatch_event_rule" "start_service" {
+  name = local.event_rule_start_name
 }
 
-# ============================================
-# IAM Role for EC2
-# ============================================
-
-resource "aws_iam_role" "ec2" {
-  name = "${var.project_name}-ec2-role"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Action    = "sts:AssumeRole"
-      Effect    = "Allow"
-      Principal = { Service = "ec2.amazonaws.com" }
-    }]
-  })
+data "aws_cloudwatch_event_rule" "stop_service" {
+  name = local.event_rule_stop_name
 }
 
-resource "aws_iam_role_policy" "ec2_app" {
-  name = "app-access"
-  role = aws_iam_role.ec2.id
+# ============================================================
+# Outputs de infraestructura activa
+# ============================================================
 
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "dynamodb:PutItem",
-          "dynamodb:GetItem",
-          "dynamodb:UpdateItem",
-          "dynamodb:DeleteItem",
-          "dynamodb:Query",
-          "dynamodb:Scan"
-        ]
-        Resource = [
-          aws_dynamodb_table.waves.arn,
-          aws_dynamodb_table.users.arn,
-          aws_dynamodb_table.tracks.arn,
-          aws_dynamodb_table.cache.arn,
-          aws_dynamodb_table.sessions.arn,
-          "${aws_dynamodb_table.tracks.arn}/index/*",
-          "${aws_dynamodb_table.sessions.arn}/index/*"
-        ]
-      },
-      {
-        Effect   = "Allow"
-        Action   = ["ecr:GetAuthorizationToken"]
-        Resource = ["*"]
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "ecr:BatchGetImage",
-          "ecr:GetDownloadUrlForLayer"
-        ]
-        Resource = [aws_ecr_repository.app.arn]
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "logs:CreateLogStream",
-          "logs:PutLogEvents"
-        ]
-        Resource = ["${aws_cloudwatch_log_group.app.arn}:*"]
-      }
-    ]
-  })
+output "aws_account_id" {
+  description = "Cuenta AWS activa"
+  value       = data.aws_caller_identity.current.account_id
 }
 
-resource "aws_iam_instance_profile" "ec2" {
-  name = "${var.project_name}-ec2-profile"
-  role = aws_iam_role.ec2.name
+output "aws_region" {
+  description = "Región activa"
+  value       = var.aws_region
 }
 
-# ============================================
-# EC2 Instance (Free Tier: t2.micro 750hrs/mo)
-# ============================================
-
-resource "aws_instance" "app" {
-  ami                    = data.aws_ami.amazon_linux.id
-  instance_type          = "t2.micro"
-  iam_instance_profile   = aws_iam_instance_profile.ec2.name
-  vpc_security_group_ids = [aws_security_group.ec2.id]
-  subnet_id              = data.aws_subnets.default.ids[0]
-
-  associate_public_ip_address = true
-
-  root_block_device {
-    volume_size = 8
-    volume_type = "gp3"
-  }
-
-  user_data = base64encode(<<-EOF
-    #!/bin/bash
-    set -e
-    yum update -y
-    yum install -y docker
-    systemctl enable docker
-    systemctl start docker
-    usermod -aG docker ec2-user
-
-    # Create startup script
-    cat > /home/ec2-user/start-wavy.sh << 'SCRIPT'
-    #!/bin/bash
-    REGION="${var.aws_region}"
-    ACCOUNT="${var.aws_account_id}"
-    REPO="$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/${var.project_name}"
-    PUBLIC_IP=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4 || echo "localhost")
-
-    aws ecr get-login-password --region $REGION | docker login --username AWS --password-stdin $ACCOUNT.dkr.ecr.$REGION.amazonaws.com
-    docker pull $REPO:latest
-    docker stop wavy 2>/dev/null; docker rm wavy 2>/dev/null
-
-    docker run -d --restart=always --name wavy \
-      -p 3000:3000 -p 1935:1935 -p 8000:8000 -p 7880:7880 \
-      -e NODE_ENV=production \
-      -e PORT=3000 \
-      -e AWS_REGION=$REGION \
-      -e LIVEKIT_API_KEY=${var.livekit_api_key} \
-      -e LIVEKIT_API_SECRET=${var.livekit_api_secret} \
-      -e LIVEKIT_URL=ws://localhost:7880 \
-      -e PUBLIC_HOST=$PUBLIC_IP \
-      -e JWT_SECRET=${var.jwt_secret} \
-      $REPO:latest
-    SCRIPT
-    chmod +x /home/ec2-user/start-wavy.sh
-
-    # Create systemd service to run on boot
-    cat > /etc/systemd/system/wavy.service << 'SVC'
-    [Unit]
-    Description=WAVY Backend
-    After=docker.service
-    Requires=docker.service
-
-    [Service]
-    Type=oneshot
-    RemainAfterExit=yes
-    ExecStart=/home/ec2-user/start-wavy.sh
-
-    [Install]
-    WantedBy=multi-user.target
-    SVC
-    systemctl enable wavy.service
-
-    # Run now
-    /home/ec2-user/start-wavy.sh
-  EOF
-  )
-
-  tags = { Name = var.project_name }
-}
-
-# ============================================
-# Lambda Start/Stop (Free Tier: 1M req/mo)
-# ============================================
-
-resource "aws_iam_role" "lambda" {
-  name = "${var.project_name}-lambda-role"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Action    = "sts:AssumeRole"
-      Effect    = "Allow"
-      Principal = { Service = "lambda.amazonaws.com" }
-    }]
-  })
-}
-
-resource "aws_iam_role_policy" "lambda_ec2" {
-  name = "ec2-startstop"
-  role = aws_iam_role.lambda.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect   = "Allow"
-        Action   = ["ec2:StartInstances", "ec2:StopInstances"]
-        Resource = [aws_instance.app.arn]
-      },
-      {
-        Effect   = "Allow"
-        Action   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
-        Resource = ["*"]
-      }
-    ]
-  })
-}
-
-data "archive_file" "lambda_stop" {
-  type        = "zip"
-  output_path = "${path.module}/lambda_stop.zip"
-
-  source {
-    content  = <<-PYEOF
-      import boto3
-      def lambda_handler(event, context):
-          boto3.client('ec2').stop_instances(InstanceIds=['${aws_instance.app.id}'])
-          return {'statusCode': 200, 'body': 'Stopped'}
-    PYEOF
-    filename = "lambda_function.py"
-  }
-}
-
-data "archive_file" "lambda_start" {
-  type        = "zip"
-  output_path = "${path.module}/lambda_start.zip"
-
-  source {
-    content  = <<-PYEOF
-      import boto3
-      def lambda_handler(event, context):
-          boto3.client('ec2').start_instances(InstanceIds=['${aws_instance.app.id}'])
-          return {'statusCode': 200, 'body': 'Started'}
-    PYEOF
-    filename = "lambda_function.py"
-  }
-}
-
-resource "aws_lambda_function" "stop_service" {
-  filename         = data.archive_file.lambda_stop.output_path
-  function_name    = "${var.project_name}-stop"
-  role             = aws_iam_role.lambda.arn
-  handler          = "lambda_function.lambda_handler"
-  runtime          = "python3.12"
-  source_code_hash = data.archive_file.lambda_stop.output_base64sha256
-}
-
-resource "aws_lambda_function" "start_service" {
-  filename         = data.archive_file.lambda_start.output_path
-  function_name    = "${var.project_name}-start"
-  role             = aws_iam_role.lambda.arn
-  handler          = "lambda_function.lambda_handler"
-  runtime          = "python3.12"
-  source_code_hash = data.archive_file.lambda_start.output_base64sha256
-}
-
-# ============================================
-# EventBridge Rules (8 AM - 4 PM COT)
-# ============================================
-
-resource "aws_cloudwatch_event_rule" "start_service" {
-  name                = "${var.project_name}-start"
-  description         = "Start EC2 at 8 AM COT (13 UTC)"
-  schedule_expression = "cron(0 13 ? * MON-FRI *)"
-}
-
-resource "aws_cloudwatch_event_rule" "stop_service" {
-  name                = "${var.project_name}-stop"
-  description         = "Stop EC2 at 4 PM COT (21 UTC)"
-  schedule_expression = "cron(0 21 ? * MON-FRI *)"
-}
-
-resource "aws_cloudwatch_event_target" "start_service" {
-  rule = aws_cloudwatch_event_rule.start_service.name
-  arn  = aws_lambda_function.start_service.arn
-}
-
-resource "aws_cloudwatch_event_target" "stop_service" {
-  rule = aws_cloudwatch_event_rule.stop_service.name
-  arn  = aws_lambda_function.stop_service.arn
-}
-
-resource "aws_lambda_permission" "start_eventbridge" {
-  statement_id  = "AllowEventBridgeStart"
-  action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.start_service.function_name
-  principal     = "events.amazonaws.com"
-  source_arn    = aws_cloudwatch_event_rule.start_service.arn
-}
-
-resource "aws_lambda_permission" "stop_eventbridge" {
-  statement_id  = "AllowEventBridgeStop"
-  action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.stop_service.function_name
-  principal     = "events.amazonaws.com"
-  source_arn    = aws_cloudwatch_event_rule.stop_service.arn
-}
-
-# ============================================
-# Outputs
-# ============================================
-
-output "ec2_public_ip" {
-  description = "EC2 public IP"
-  value       = aws_instance.app.public_ip
-}
-
-output "app_url" {
-  description = "Backend URL"
-  value       = "http://${aws_instance.app.public_ip}:3000"
-}
-
-output "websocket_url" {
-  description = "WebSocket URL"
-  value       = "ws://${aws_instance.app.public_ip}:3000"
-}
-
-output "ecr_repository_url" {
-  description = "ECR repository URL"
-  value       = aws_ecr_repository.app.repository_url
-}
-
-output "instance_id" {
-  description = "EC2 instance ID"
-  value       = aws_instance.app.id
-}
-
-output "dynamodb_tables" {
-  description = "DynamoDB table names"
+output "alb" {
+  description = "Application Load Balancer en producción"
   value = {
-    waves    = aws_dynamodb_table.waves.name
-    users    = aws_dynamodb_table.users.name
-    tracks   = aws_dynamodb_table.tracks.name
-    cache    = aws_dynamodb_table.cache.name
-    sessions = aws_dynamodb_table.sessions.name
+    name       = data.aws_lb.alb.name
+    arn        = data.aws_lb.alb.arn
+    dns_name   = data.aws_lb.alb.dns_name
+    scheme     = data.aws_lb.alb.internal ? "internal" : "internet-facing"
+    type       = data.aws_lb.alb.load_balancer_type
+    security_group_id = data.aws_security_group.alb.id
   }
 }
 
+output "backend_urls" {
+  description = "Endpoints de backend activos"
+  value = {
+    https_base = "https://${data.aws_lb.alb.dns_name}"
+    http_base  = "http://${data.aws_lb.alb.dns_name}"
+    websocket  = "wss://${data.aws_lb.alb.dns_name}"
+  }
+}
 
-output "schedule" {
-  description = "Service schedule"
-  value       = "8 AM - 4 PM COT (Mon-Fri)"
+output "ecs" {
+  description = "ECS Fargate activo"
+  value = {
+    cluster_arn  = data.aws_ecs_cluster.main.arn
+    service_name = data.aws_ecs_service.backend.name
+    task_family  = local.ecs_task_family
+    desired_count = data.aws_ecs_service.backend.desired_count
+    launch_type   = data.aws_ecs_service.backend.launch_type
+  }
+}
+
+output "target_group" {
+  description = "Target group del backend"
+  value = {
+    name             = data.aws_lb_target_group.backend.name
+    arn              = data.aws_lb_target_group.backend.arn
+    port             = data.aws_lb_target_group.backend.port
+    protocol         = data.aws_lb_target_group.backend.protocol
+    health_check_path = data.aws_lb_target_group.backend.health_check[0].path
+  }
+}
+
+output "network" {
+  description = "Red activa usada por WAVY"
+  value = {
+    vpc_id      = data.aws_vpc.default.id
+    vpc_cidr    = data.aws_vpc.default.cidr_block
+    subnet_ids  = data.aws_subnets.default.ids
+    alb_sg_id   = data.aws_security_group.alb.id
+    ecs_sg_id   = data.aws_security_group.ecs.id
+  }
+}
+
+output "storage" {
+  description = "Almacenamiento activo"
+  value = {
+    s3_bucket            = data.aws_s3_bucket.music.id
+    ecr_repository       = data.aws_ecr_repository.backend.name
+    ecr_repository_url   = data.aws_ecr_repository.backend.repository_url
+    dynamodb_waves       = data.aws_dynamodb_table.waves.name
+    dynamodb_users       = data.aws_dynamodb_table.users.name
+    dynamodb_tracks      = data.aws_dynamodb_table.tracks.name
+    dynamodb_cache       = data.aws_dynamodb_table.cache.name
+    dynamodb_sessions    = data.aws_dynamodb_table.sessions.name
+  }
+}
+
+output "observability" {
+  description = "Logs y automatizaciones activas"
+  value = {
+    ecs_log_group         = data.aws_cloudwatch_log_group.ecs.name
+    lambda_stop_log_group = data.aws_cloudwatch_log_group.lambda_stop.name
+    lambda_stop_name      = data.aws_lambda_function.stop_service.function_name
+    event_rule_start      = data.aws_cloudwatch_event_rule.start_service.name
+    event_rule_stop       = data.aws_cloudwatch_event_rule.stop_service.name
+  }
 }
