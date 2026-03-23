@@ -88,7 +88,8 @@ module.exports = (io, socket) => {
   // Host notifies that streaming has started – listeners should request an offer
   socket.on('mic_started', () => {
     const room = rooms.get(socket.roomId);
-    if (!room) return;
+    if (!room || !socket.isHost) return;
+    if (room.micActive) return;
     room.micActive = true;
     socket.to(socket.roomId).emit('mic_started', {
       hostUserId: socket.userId,
@@ -99,7 +100,8 @@ module.exports = (io, socket) => {
 
   socket.on('mic_stopped', () => {
     const room = rooms.get(socket.roomId);
-    if (!room) return;
+    if (!room || !socket.isHost) return;
+    if (!room.micActive) return;
     room.micActive = false;
     socket.to(socket.roomId).emit('mic_stopped', {
       hostUserId: socket.userId,
