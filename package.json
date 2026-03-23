@@ -18,7 +18,6 @@
     "jsonwebtoken": "^9.0.2",
     "uuid": "^9.0.1",
     "fluent-ffmpeg": "^2.1.2",
-    "livekit-server-sdk": "^2.0.0",
     "node-media-server": "^2.6.0"
   },
   "devDependencies": {

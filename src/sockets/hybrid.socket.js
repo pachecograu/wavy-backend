@@ -1,168 +1,176 @@
 const hlsService = require('../services/hls.service');
-const liveKitService = require('../services/livekit.service');
+
+/**
+ * Per-room state: roomId -> { users: Map<userId, socketId>, hostUserId, micActive }
+ * This is in-memory only – fine for a single ECS task.
+ */
+const rooms = new Map();
+
+function getRoom(roomId) {
+  if (!rooms.has(roomId)) {
+    rooms.set(roomId, { users: new Map(), hostUserId: null, micActive: false });
+  }
+  return rooms.get(roomId);
+}
+
+function findSocketId(roomId, userId) {
+  return rooms.get(roomId)?.users.get(userId);
+}
+
+function handleLeave(io, socket) {
+  const { roomId, userId } = socket;
+  if (!roomId || !userId) return;
+
+  const room = rooms.get(roomId);
+  if (room) {
+    room.users.delete(userId);
+    if (socket.isHost) {
+      room.hostUserId = null;
+      room.micActive = false;
+    }
+    if (room.users.size === 0) rooms.delete(roomId);
+  }
+
+  socket.leave(roomId);
+  socket.to(roomId).emit('user_left_room', { userId, timestamp: Date.now() });
+  // Tell remaining peers to close their WebRTC connection to this user
+  socket.to(roomId).emit('webrtc_peer_disconnected', { userId });
+
+  socket.roomId = null;
+  socket.userId = null;
+  socket.isHost = false;
+  console.log(`🌊 User ${userId} left hybrid room ${roomId}`);
+}
 
 module.exports = (io, socket) => {
   console.log(`🔌 Hybrid socket connected: ${socket.id}`);
-  
-  // Unirse a sala híbrida (música + voz)
-  socket.on('join_hybrid_room', async (data) => {
+
+  // ─── JOIN ──────────────────────────────────────────────────────────────────
+  socket.on('join_hybrid_room', (data) => {
     try {
-      console.log(`🌊 Received join_hybrid_room:`, data);
-      const { roomId, userId, isHost } = data;
-      
+      const { roomId, userId, isHost } = data || {};
       if (!roomId || !userId) {
         socket.emit('error', { message: 'Missing roomId or userId' });
         return;
       }
-      
-      // Unirse a la sala de Socket.IO
+
       socket.join(roomId);
       socket.roomId = roomId;
       socket.userId = userId;
       socket.isHost = !!isHost;
-      
-      // Crear sala de voz si es host (non-blocking, LiveKit may not be available)
-      if (isHost) {
-        liveKitService.createVoiceRoom(roomId).catch(() => {});
-      }
-      
-      // Responder con URLs de streaming
-      const response = {
-        roomId,
-        hlsUrl: hlsService.getStreamUrl(roomId),
-        isStreamActive: hlsService.isStreamActive(roomId)
-      };
-      
-      console.log(`🌊 Sending hybrid_room_joined:`, response);
-      socket.emit('hybrid_room_joined', response);
-      
-      // Notificar a otros en la sala
-      socket.to(roomId).emit('user_joined_room', {
-        userId,
-        timestamp: Date.now()
-      });
-      
-      console.log(`🌊 User ${userId} joined hybrid room ${roomId}`);
-    } catch (error) {
-      console.error(`❌ Error in join_hybrid_room:`, error);
-      socket.emit('error', { message: 'Error joining room', error: error.message });
-    }
-  });
 
-  // Solicitar token de voz
-  socket.on('request_voice_token', async (data) => {
-    try {
-      const { roomId } = data;
-      const userId = socket.userId;
-      const isHost = socket.isHost === true;
-      
-      if (!userId || !roomId) {
-        socket.emit('error', { message: 'Missing userId or roomId' });
-        return;
-      }
+      const room = getRoom(roomId);
+      room.users.set(userId, socket.id);
+      if (isHost) room.hostUserId = userId;
 
-      // Ensure room exists (host path already creates it in join_hybrid_room,
-      // but this protects reconnect / race conditions)
-      try {
-        await liveKitService.createVoiceRoom(roomId);
-      } catch (_) {}
-      
-      const voiceToken = await liveKitService.createVoiceToken(roomId, userId, isHost);
-      
-      socket.emit('voice_token_granted', {
-        ...voiceToken,
-        roomId
-      });
-      
-      // Agregar participante a la sala de voz
-      liveKitService.addParticipantToVoiceRoom(roomId, userId);
-      
-      // Notificar a otros que alguien se unió a la voz
-      socket.to(roomId).emit('voice_participant_joined', {
-        userId,
-        timestamp: Date.now()
-      });
-      
-      console.log(`🎙️ Voice token granted to ${userId} for room ${roomId}`);
-    } catch (error) {
-      socket.emit('error', { message: 'Error creating voice token', error: error.message });
-    }
-  });
-
-  // Salir de sala híbrida
-  socket.on('leave_hybrid_room', async () => {
-    try {
-      const roomId = socket.roomId;
-      const userId = socket.userId;
-      
-      if (roomId && userId) {
-        // Salir de Socket.IO room
-        socket.leave(roomId);
-        
-        // Remover de sala de voz
-        liveKitService.removeParticipantFromVoiceRoom(roomId, userId);
-        
-        // Notificar a otros
-        socket.to(roomId).emit('user_left_room', {
-          userId,
-          timestamp: Date.now()
-        });
-        
-        socket.to(roomId).emit('voice_participant_left', {
-          userId,
-          timestamp: Date.now()
-        });
-        
-        console.log(`🌊 User ${userId} left hybrid room ${roomId}`);
-      }
-      
-      socket.roomId = null;
-      socket.userId = null;
-      socket.isHost = false;
-    } catch (error) {
-      console.error('Error leaving hybrid room:', error);
-    }
-  });
-
-  // Obtener estado de la sala
-  socket.on('get_room_status', async (data) => {
-    try {
-      const { roomId } = data;
-      
-      const status = {
+      socket.emit('hybrid_room_joined', {
         roomId,
         hlsUrl: hlsService.getStreamUrl(roomId),
         isStreamActive: hlsService.isStreamActive(roomId),
-        voiceParticipants: liveKitService.getVoiceParticipants(roomId),
-        voiceRoomInfo: await liveKitService.getVoiceRoomInfo(roomId)
-      };
-      
-      socket.emit('room_status', status);
-    } catch (error) {
-      socket.emit('error', { message: 'Error getting room status', error: error.message });
+        hostUserId: room.hostUserId,
+        micActive: room.micActive,
+      });
+
+      socket.to(roomId).emit('user_joined_room', {
+        userId,
+        isHost: !!isHost,
+        timestamp: Date.now(),
+      });
+
+      console.log(`🌊 User ${userId} joined room ${roomId} (host: ${isHost})`);
+    } catch (err) {
+      console.error('❌ join_hybrid_room error:', err);
+      socket.emit('error', { message: err.message });
     }
   });
 
-  // Manejar desconexión
-  socket.on('disconnect', async () => {
-    try {
-      const roomId = socket.roomId;
-      const userId = socket.userId;
-      
-      if (roomId && userId) {
-        // Remover de sala de voz
-        liveKitService.removeParticipantFromVoiceRoom(roomId, userId);
-        
-        // Notificar a otros
-        socket.to(roomId).emit('user_disconnected', {
-          userId,
-          timestamp: Date.now()
-        });
-        
-        console.log(`🌊 User ${userId} disconnected from room ${roomId}`);
-      }
-    } catch (error) {
-      console.error('Error handling disconnect:', error);
+  // ─── MIC STATE ────────────────────────────────────────────────────────────
+  // Host notifies that streaming has started – listeners should request an offer
+  socket.on('mic_started', () => {
+    const room = rooms.get(socket.roomId);
+    if (!room) return;
+    room.micActive = true;
+    socket.to(socket.roomId).emit('mic_started', {
+      hostUserId: socket.userId,
+      timestamp: Date.now(),
+    });
+    console.log(`🎙️ Mic started in room ${socket.roomId} by ${socket.userId}`);
+  });
+
+  socket.on('mic_stopped', () => {
+    const room = rooms.get(socket.roomId);
+    if (!room) return;
+    room.micActive = false;
+    socket.to(socket.roomId).emit('mic_stopped', {
+      hostUserId: socket.userId,
+      timestamp: Date.now(),
+    });
+    console.log(`🎙️ Mic stopped in room ${socket.roomId}`);
+  });
+
+  // ─── WebRTC SIGNALING ─────────────────────────────────────────────────────
+  // Listener asks host to create a peer connection for it
+  socket.on('request_webrtc_offer', (data) => {
+    const { targetUserId } = data || {};
+    const targetSocketId = findSocketId(socket.roomId, targetUserId);
+    if (targetSocketId) {
+      io.to(targetSocketId).emit('webrtc_offer_requested', {
+        fromUserId: socket.userId,
+      });
     }
   });
+
+  // Host sends SDP offer to a specific listener
+  socket.on('webrtc_offer', (data) => {
+    const { targetUserId, sdp } = data || {};
+    const targetSocketId = findSocketId(socket.roomId, targetUserId);
+    if (targetSocketId) {
+      io.to(targetSocketId).emit('webrtc_offer', {
+        fromUserId: socket.userId,
+        sdp,
+      });
+    }
+  });
+
+  // Listener sends SDP answer back to host
+  socket.on('webrtc_answer', (data) => {
+    const { targetUserId, sdp } = data || {};
+    const targetSocketId = findSocketId(socket.roomId, targetUserId);
+    if (targetSocketId) {
+      io.to(targetSocketId).emit('webrtc_answer', {
+        fromUserId: socket.userId,
+        sdp,
+      });
+    }
+  });
+
+  // ICE candidate relay (bidirectional)
+  socket.on('webrtc_ice_candidate', (data) => {
+    const { targetUserId, candidate } = data || {};
+    const targetSocketId = findSocketId(socket.roomId, targetUserId);
+    if (targetSocketId) {
+      io.to(targetSocketId).emit('webrtc_ice_candidate', {
+        fromUserId: socket.userId,
+        candidate,
+      });
+    }
+  });
+
+  // ─── ROOM STATUS ──────────────────────────────────────────────────────────
+  socket.on('get_room_status', (data) => {
+    const roomId = data?.roomId || socket.roomId;
+    const room = rooms.get(roomId);
+    socket.emit('room_status', {
+      roomId,
+      hlsUrl: hlsService.getStreamUrl(roomId),
+      isStreamActive: hlsService.isStreamActive(roomId),
+      participants: room ? [...room.users.keys()] : [],
+      micActive: room?.micActive ?? false,
+      hostUserId: room?.hostUserId ?? null,
+    });
+  });
+
+  // ─── LEAVE / DISCONNECT ───────────────────────────────────────────────────
+  socket.on('leave_hybrid_room', () => handleLeave(io, socket));
+  socket.on('disconnect', () => handleLeave(io, socket));
 };

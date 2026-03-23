@@ -15,7 +15,6 @@ const qualitySocket = require('./sockets/quality.socket');
 const logSocket = require('./sockets/log.socket');
 
 const hlsService = require('./services/hls.service');
-const liveKitService = require('./services/livekit.service');
 const Cache = require('./models/Cache');
 
 const app = express();
@@ -51,31 +50,6 @@ app.get('/api/rooms/:roomId/stream', (req, res) => {
   });
 });
 
-app.post('/api/rooms/:roomId/voice-token', async (req, res) => {
-  try {
-    const { roomId } = req.params;
-    const { userId, isHost } = req.body;
-    
-    // Check cache first
-    const cachedToken = await Cache.getCachedVoiceToken(roomId, userId);
-    if (cachedToken) {
-      console.log(`🎯 Cache hit: Voice token for ${userId} in room ${roomId}`);
-      return res.json(cachedToken);
-    }
-    
-    // Generate new token
-    const voiceToken = await liveKitService.createVoiceToken(roomId, userId, isHost);
-    
-    // Cache the token
-    await Cache.cacheVoiceToken(roomId, userId, voiceToken);
-    console.log(`💾 Cached voice token for ${userId} in room ${roomId}`);
-    
-    res.json(voiceToken);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
 
 // Socket.IO
 io.on('connection', (socket) => {
@@ -102,7 +76,7 @@ app.get('/health', (req, res) => {
     timestamp: new Date().toISOString(),
     services: {
       hls: hlsService.getActiveStreams().length > 0,
-      voice: liveKitService.getActiveVoiceRooms().length > 0
+      voice: 'webrtc-p2p'
     }
   });
 });
@@ -111,5 +85,5 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`🌊 WAVY Backend running on port ${PORT}`);
   console.log(`🎵 HLS streams available at http://localhost:${PORT}/hls`);
-  console.log(`🎙️ LiveKit WebRTC on ws://localhost:7880`);
+  console.log(`🎙️ WebRTC P2P signaling active`);
 });
