@@ -19,6 +19,7 @@ module.exports = (io, socket) => {
       socket.join(roomId);
       socket.roomId = roomId;
       socket.userId = userId;
+      socket.isHost = !!isHost;
       
       // Crear sala de voz si es host (non-blocking, LiveKit may not be available)
       if (isHost) {
@@ -53,13 +54,20 @@ module.exports = (io, socket) => {
     try {
       const { roomId } = data;
       const userId = socket.userId;
+      const isHost = socket.isHost === true;
       
       if (!userId || !roomId) {
         socket.emit('error', { message: 'Missing userId or roomId' });
         return;
       }
+
+      // Ensure room exists (host path already creates it in join_hybrid_room,
+      // but this protects reconnect / race conditions)
+      try {
+        await liveKitService.createVoiceRoom(roomId);
+      } catch (_) {}
       
-      const voiceToken = await liveKitService.createVoiceToken(roomId, userId);
+      const voiceToken = await liveKitService.createVoiceToken(roomId, userId, isHost);
       
       socket.emit('voice_token_granted', {
         ...voiceToken,
@@ -110,6 +118,7 @@ module.exports = (io, socket) => {
       
       socket.roomId = null;
       socket.userId = null;
+      socket.isHost = false;
     } catch (error) {
       console.error('Error leaving hybrid room:', error);
     }

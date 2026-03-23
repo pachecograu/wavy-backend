@@ -5,11 +5,24 @@ class LiveKitService {
     this.apiKey = process.env.LIVEKIT_API_KEY || 'devkey';
     this.apiSecret = process.env.LIVEKIT_API_SECRET || 'secret';
     const host = process.env.PUBLIC_HOST || 'localhost';
-    this.wsUrl = process.env.LIVEKIT_URL || `ws://${host}:7880`;
-    
-    this.roomService = new RoomServiceClient(this.wsUrl, this.apiKey, this.apiSecret);
+    this.internalWsUrl = process.env.LIVEKIT_URL || `ws://${host}:7880`;
+    this.publicWsUrl = this._resolvePublicWsUrl(this.internalWsUrl, host);
+
+    this.roomService = new RoomServiceClient(this.internalWsUrl, this.apiKey, this.apiSecret);
     this.activeVoiceRooms = new Map();
     console.log('🎙️ LiveKit Service initialized');
+  }
+
+  _resolvePublicWsUrl(internalWsUrl, publicHost) {
+    try {
+      const parsed = new URL(internalWsUrl);
+      if (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1') {
+        return `${parsed.protocol}//${publicHost}:${parsed.port || '7880'}`;
+      }
+      return internalWsUrl;
+    } catch (_) {
+      return `ws://${publicHost}:7880`;
+    }
   }
 
   async createVoiceToken(roomId, participantId, isHost = false) {
@@ -32,7 +45,7 @@ class LiveKitService {
       
       return {
         token,
-        wsUrl: this.wsUrl,
+        wsUrl: this.publicWsUrl,
         roomName: `voice_${roomId}`
       };
     } catch (error) {
